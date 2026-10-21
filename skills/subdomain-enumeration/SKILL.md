@@ -1,6 +1,8 @@
 ---
 name: subdomain-enumeration
 description: Subdomain enumeration using Subfinder and SubDog for discovery, followed by a mandatory naabu port scan of every discovered host and a mandatory httpx probe of every naabu-confirmed host. Optionally crawls with katana and urlflux when the user asks for URL crawling. Use when the user asks to discover subdomains with these tools, or asks to enumerate a domain's subdomains and their open ports. Covers passive hostname discovery plus active port scanning, HTTP probing, and conditional URL crawling — not takeover checks or vulnerability testing.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Subdomain Enumeration
