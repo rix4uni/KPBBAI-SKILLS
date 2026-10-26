@@ -1,6 +1,6 @@
 ---
 name: url-crawling
-description: Subdomain enumeration using Subfinder and SubDog for discovery, followed by a mandatory naabu port scan of every discovered host and a mandatory httpx probe of every naabu-confirmed host. Optionally crawls with katana and urlflux when the user asks for URL crawling. Use when the user asks to discover subdomains with these tools, or asks to enumerate a domain's subdomains and their open ports. Covers passive hostname discovery plus active port scanning, HTTP probing, and conditional URL crawling — not takeover checks or vulnerability testing.
+description: Crawl URLs from an existing subdomain-enumeration run using katana and urlflux. Use when the user explicitly asks to crawl URLs, collect endpoints, or discover paths from a prior enumeration's httpx output. Requires an existing httpx.txt from a subdomain-enumeration run; merges and deduplicates both crawlers' output into a single URL list. Covers katana and urlflux invocation, deduplication, and the crawl count report — not subdomain discovery, port scanning, takeover checks, or vulnerability testing.
 metadata:
   opencode/slash: "true"
 ---
