@@ -1,7 +1,7 @@
 ---
-description: Hunt reflected XSS — map reflections, classify encoding, prove execution with the dialog trio in a real browser
+description: Hunt XSS — map reflections, classify encoding, prove execution with the dialog trio in a real browser
 ---
-Load the `reflected-xss` skill (id `reflected`) and follow it exactly.
+Load the `xss` skill (id `xss`) and follow it exactly.
 
 Target (URL, host, or existing crawl output): $ARGUMENTS
 
