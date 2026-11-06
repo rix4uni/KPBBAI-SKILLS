@@ -283,3 +283,96 @@ When multiple slop tells co-occur on a report whose core finding is real (per re
 - Don't speculate in the reporter's favor. If the report doesn't prove something and your replay didn't reproduce it, it's not proven. You don't do their work for them.
 - Do acknowledge good work. If a report is solid, say so concisely: "Clear reproduction, replay matched the documented PoC, valid finding."
 - If rejecting, make the rejection useful. Tell them exactly what would change your mind, if anything. "If you can demonstrate that the reflected parameter executes as JavaScript in a current browser without user interaction, attach the captured request / response, and resubmit."
+
+---
+
+## Phase 6: Automated Hunt Triage Routing
+
+When triaging findings from an automated bug bounty hunt (Phase 6), apply this routing model to route each finding from `reports/` into the dig tree.
+
+### Routing Verdicts
+
+| Verdict | Meaning |
+|---------|---------|
+| `DIG` | Confirmed/clearly probable finding — enter full validation (Phase 7) |
+| `CANDIDATE` | Plausible but one prerequisite is unresolved — gate on prerequisite first |
+| `NA` | Disproved or below submission floor — archive |
+| `MERGED` | Duplicate of another finding in this run — record and exclude |
+
+### The "So What" Test (Mandatory)
+
+Before routing anything as DIG or CANDIDATE, state the concrete attacker outcome:
+
+> "An attacker with [starting capability] can [specific action] resulting in [concrete harm to real user/data/system]."
+
+If you cannot complete this sentence with specific demonstrated evidence — not theoretical possibility — the finding does not pass. "Could lead to" and "might allow" are not answers.
+
+### DIG Routing Criteria
+
+Route as DIG when ALL of the following are true:
+- The core vulnerability mechanism is demonstrated
+- The finding is in scope
+- Severity is medium or above
+- The "So What" test passes with concrete demonstrated impact
+
+### CANDIDATE Routing (Prerequisite Gate)
+
+Route as CANDIDATE when:
+- The underlying security flaw is real and demonstrated
+- One specific prerequisite for full exploit is not yet resolved
+- The finding would be DIG if the prerequisite was resolved
+
+**For every CANDIDATE, record:**
+```
+Primitive proven: <what is confirmed true>
+Unresolved prerequisite: <exactly what is missing>
+P07 prerequisite-first tests: <specific sources to check>
+Disproof stop condition: <when to declare DISPROVED>
+Validation constraint: <any safety/scope limits on testing>
+```
+
+### IDOR "Owned-Test-Account Trap"
+
+For every IDOR/cross-tenant/"access victim's X" finding, require BOTH:
+
+1. **Authz broken (mechanic):** Account A can reach Account B's resource given its identifier. Owning both accounts proves this.
+2. **Identifier obtainable (delivery):** An attacker who controls only their own account can learn a victim's identifier — without reading it from Account B's session.
+
+For delivery, check: sequential/low-entropy IDs, leak in list/search/members/autocomplete/public-profile, GraphQL introspection, JS bundles, error messages, redirects, OAuth callbacks.
+
+If victim ID is UUIDv4/v5 and no leak is found after checking those sources → route as NA (not CANDIDATE).
+
+### Rate-Limit / Brute-Force Gate
+
+Missing rate limit alone is NOT medium. Requirements for CONFIRMED:
+- Low-entropy secret target (4–6 digit OTP, long/no expiry)
+- Demonstrated unthrottled path
+- Reachable real target
+- Math showing attack is feasible
+
+**Exception:** When unthrottled enumeration directly extracts value (gift cards, voucher codes, promo codes) — the enumeration gap IS the finding. Prove with a real hit or demonstrated enumeration rate.
+
+### Exposed Credential Exception
+
+A live credential finding routes as DIG with minimal liveness evidence (auth differential + negative control). Authority escalation happens in Phase 7.
+
+### Stray Finding Recovery
+
+Before finalizing, scan `hunt/` files for `Status: CONFIRMED*` entries without corresponding reports. Each must be written as a report (if medium+) or added to SPINOFF-LEADS.md.
+
+### Deduplication Within This Run
+
+Check all existing reports for the same root cause and same fix. Route duplicates as MERGED with the canonical finding noted.
+
+### Phase 6 Dig Tree Structure
+
+```
+dig/
+├── CRITICAL-<slug>/v1/report.md   (DIG)
+├── HIGH-<slug>/v1/report.md       (DIG)
+├── MEDIUM-<slug>/v1/              (DIG or CANDIDATE)
+│   ├── report.md
+│   └── CANDIDATE.md               (if CANDIDATE)
+└── NA-DISPROVED/
+    └── <slug>/DISPROVED.md
+```
