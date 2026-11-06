@@ -126,3 +126,134 @@ Phase 0 is complete when:
 - `raw/recon-shapes.txt` has at least 3 routes
 - `raw/threat-model.json` exists
 - `raw/operation-candidates.jsonl` has at least 5 entries
+
+---
+
+## From hack-skills: API Recon & Documentation Discovery
+
+### JS Mining for Endpoints
+```bash
+# Download and extract endpoints from JS bundles
+gau target.com | grep "\.js$" | sort -u > js-urls.txt
+waybackurls target.com | grep "\.js$" >> js-urls.txt
+cat js-urls.txt | xargs -I{} curl -s {} | grep -Eo '["'\''`][/][a-zA-Z0-9_/-]+["'\''`]' | sort -u
+# or use LinkFinder:
+python3 linkfinder.py -i https://target.com/app.js -o cli
+```
+
+### Common API Documentation Paths
+```
+/swagger.json            /swagger.yaml
+/swagger-ui.html         /api-docs
+/openapi.json            /openapi.yaml
+/api/v1/swagger.json     /api/swagger.json
+/v1/api-docs             /v2/api-docs
+/v3/api-docs             /.well-known/openapi
+/graphql                 /graphql/playground
+/graphiql                /api/graphql
+```
+
+### API Version Drift Testing
+```
+/api/v1/users   → check if /api/v2/ exposes same but with less auth
+/api/mobile/v1/ → mobile endpoints often have weaker auth checks
+/internal/api/  → internal routes sometimes reachable externally
+/api/admin/     → admin endpoints with different ACL
+```
+
+### Parameter Discovery
+```bash
+arjun -u https://target.com/endpoint -oJ arjun-results.json
+x8 -u "https://target.com/page" -w /path/to/params.txt -o x8-results.txt
+```
+
+---
+
+## From hack-skills: Subdomain Enumeration & Full Recon Commands
+
+### Subdomain Enumeration
+```bash
+subfinder -d target.com -all -o subfinder-out.txt
+amass enum -passive -d target.com -o amass-out.txt
+# Mass DNS resolution:
+cat all-subs.txt | massdns -r resolvers.txt -t A -o S -w massdns-out.txt
+# Probe live hosts:
+cat massdns-out.txt | dnsx -resp -a -o live-hosts.txt
+# HTTP probe:
+cat live-hosts.txt | httpx -sc -title -tech-detect -o httpx-out.txt
+```
+
+### Port Scan
+```bash
+nmap -iL live-hosts.txt -p 80,443,8080,8443,8888,3000,4443,9090,9200,6379,27017 --open -oA nmap-out
+```
+
+### Tech Fingerprinting
+```
+Cookies: PHPSESSID (PHP), JSESSIONID (Java), ASP.NET_SessionId (.NET)
+Headers: X-Powered-By, X-Generator, X-Drupal-Cache, X-WordPress-Cache
+Meta generators: <meta name="generator" content="WordPress 6.x">
+Error pages: stack traces leak framework/version
+```
+
+### Endpoint Discovery
+```bash
+ffuf -u https://target.com/FUZZ -w /usr/share/wordlists/dirb/common.txt -mc 200,301,302,403 -o ffuf-out.json
+feroxbuster -u https://target.com -w wordlist.txt --depth 3 -o ferox-out.txt
+```
+
+### GitHub Dorks
+```
+org:target "password" OR "secret" OR "api_key"
+site:github.com "target.com" "api_key"
+site:github.com "target.com" extension:env
+site:github.com inurl:target.com "Authorization: Bearer"
+```
+
+### Zseano's Parameter→Vulnerability Mapping
+```
+?redirect=   ?url=   ?next=   → Open Redirect
+?file=   ?path=   ?include= → LFI/Path Traversal
+?id=   ?user=   ?uid=       → IDOR/BOLA
+?template=   ?view=          → SSTI
+?query=   ?search=            → SQLi / XSS
+?callback=   ?jsonp=          → JSONP XSS
+?src=   ?img=   ?url=         → SSRF
+```
+
+### Nuclei Automation
+```bash
+nuclei -l live-hosts.txt -t cves/ -t exposures/ -t misconfigurations/ -severity medium,high,critical -o nuclei-out.txt
+# Target-specific:
+nuclei -u https://target.com -t fuzzing-templates/
+```
+
+### Java Middleware Fingerprint Matrix
+```
+Tomcat:         /manager/html  → HTTP 401 with "Apache Tomcat" in header
+JBoss:          /jmx-console/  /web-console/
+WebLogic:       /console/      T3 on :7001
+Spring Boot:    /actuator      /actuator/env  /actuator/heapdump
+Jenkins:        /jenkins/      /hudson/  "X-Jenkins" header
+```
+
+### Spring Boot Actuator Exploitation Priority
+```
+/actuator/env         → environment variables (secrets, credentials)
+/actuator/heapdump    → JVM heap dump (search for passwords)
+/actuator/mappings    → all routes including hidden admin endpoints
+/actuator/loggers     → may allow setting debug level to leak data
+/actuator/beans       → Spring bean definitions
+```
+
+### Version Control & Backup File Leak Checklist
+```
+/.git/config          /.git/HEAD           /.git/COMMIT_EDITMSG
+/.svn/entries         /.hg/hgrc
+/backup.zip           /backup.tar.gz       /backup.sql
+/db.sql               /dump.sql            /database.sql
+/.env                 /.env.backup         /.env.prod
+/config.php.bak       /wp-config.php.bak   /web.config.bak
+/robots.txt (look for disallowed paths)
+/sitemap.xml (enumerate hidden routes)
+```

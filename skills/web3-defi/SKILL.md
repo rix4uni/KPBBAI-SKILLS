@@ -541,3 +541,97 @@ grep -rn "function.*[Ll]iquidity\|function.*[Ll]aunch\|function.*[Tt]rading" con
 # LP lock
 grep -rn "lock.*LP\|lockLP\|lockLiquidity\|lpLocker" contracts/
 ```
+
+
+---
+
+## From hack-skills: DeFi Attack Patterns
+
+### Flash Loan Attack Framework
+
+Flash loans: uncollateralized borrow within single transaction — must repay atomically.
+
+```
+Classic oracle manipulation:
+1. Flash borrow 100,000 WETH from Aave/dYdX
+2. Swap WETH → TOKEN on AMM_A (token price skyrockets on AMM_A)
+3. Lending_Protocol reads AMM_A spot price → token "worth" 100x
+4. Deposit small TOKEN collateral → borrow large WETH at inflated price
+5. Swap TOKEN back → WETH on AMM_A (price restores)
+6. Repay flash loan; keep stolen WETH from Lending_Protocol
+
+KEY: protocols using AMM spot reserves (getReserves()) as oracle = vulnerable
+SAFE: TWAP oracle or Chainlink aggregator required
+```
+
+### Flash Loan Governance Attack
+
+```
+1. Flash borrow governance tokens (before snapshot mechanism)
+2. Create proposal: drain treasury / change admin
+3. Proposal passes instantly (borrowed tokens = quorum)
+4. Execute proposal
+5. Return governance tokens → transaction reverts if repay fails
+
+Defense: snapshot-based voting (Compound Governor Bravo), minimum proposal period, timelocks
+```
+
+### Price Oracle Manipulation
+
+| Oracle Type | Manipulation Cost | Attack Window |
+|---|---|---|
+| Spot price `getReserves()` | Single large swap (flash loanable) | Same transaction |
+| TWAP | Multi-block sustained swaps (expensive) | Multiple blocks |
+| Chainlink | Compromise majority of oracle nodes | Practically infeasible |
+
+### Chainlink Staleness Check (Common Miss)
+
+```solidity
+(, int price, , uint updatedAt, ) = priceFeed.latestRoundData();
+// MISSING CHECKS (each is a separate vulnerability):
+require(price > 0, "Invalid price");
+require(updatedAt != 0, "Round not complete");
+require(block.timestamp - updatedAt < HEARTBEAT, "Stale price");
+require(answeredInRound >= roundId, "Stale round");
+```
+
+### MEV Attacks
+
+```
+Sandwich Attack:
+  1. Spot victim's swap in mempool (e.g., TOKEN_A → TOKEN_B, 1% slippage)
+  2. Front-run: buy TOKEN_B (price increases)
+  3. Victim tx executes at worse price (within slippage tolerance)
+  4. Back-run: sell TOKEN_B for profit
+  
+Profit = victim's price impact - 2x gas
+
+JIT Liquidity (Uniswap V3):
+  1. Observe large pending swap
+  2. Add concentrated liquidity in exact price range
+  3. Victim swap executes → JIT LP earns majority of fees
+  4. Remove liquidity immediately after
+```
+
+### Vault Inflation Attack (First Depositor)
+
+```
+1. Attacker deposits 1 wei → receives 1 share
+2. Attacker donates 1,000,000 tokens directly to vault (bypassing deposit)
+3. State: 1,000,001 tokens, 1 share
+4. Victim deposits 999,999 tokens:
+   shares = 999,999 * 1 / 1,000,001 = 0 (integer truncation)
+5. Victim gets 0 shares; attacker owns 100% of vault (2,000,000 tokens)
+
+Defense: mint dead shares on first deposit; require minimum initial deposit
+```
+
+### Bridge Attack Vectors
+
+| Attack | Real-World Example |
+|---|---|
+| Signature verification bypass | Ronin Bridge $624M — compromised 5/9 validators |
+| Uninitialized guardian set | Wormhole $320M — smart contract bug |
+| Message replay | Deposit proof used on multiple chains |
+| Fake deposit proof | Submit proof for non-existent L1 deposit |
+| Upgradeable proxy exploit | Attacker gains upgrade authority → swap implementation |

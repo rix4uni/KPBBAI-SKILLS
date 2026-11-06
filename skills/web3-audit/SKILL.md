@@ -688,3 +688,105 @@ SWC-107 (Reentrancy), SWC-112 (Delegatecall untrusted callee), CUSTOM-017 (Missi
 | 8 | Flash Loan | 83% use it | Yes | Any spot price or governance vote |
 | 9 | Signature Replay | 3% | No | `ecrecover\|ECDSA.recover` |
 | 10 | Proxy/Upgrade | 2% | No | `function initialize\|_authorizeUpgrade` |
+
+
+---
+
+## From hack-skills: Smart Contract Vulnerability Patterns
+
+### Reentrancy Variants
+
+```
+Classic (CEI violation):
+  withdraw() → external call before state update
+  → attacker re-enters withdraw() before balance zeroed
+
+Cross-Function Reentrancy:
+  withdraw() → external call (balance not zeroed)
+  → attacker calls transfer() (reads stale balance)
+  → both withdraw() and transfer() succeed on same balance
+
+Read-Only Reentrancy:
+  Protocol removes liquidity → callback occurs mid-state-change
+  → third-party protocol reads stale intermediate price (inflated)
+  → profit from miscalculated collateral/borrow amounts
+  Real: Curve pool get_virtual_price() during remove_liquidity()
+```
+
+**Fix order**: Checks → Effects → Interactions (CEI) + ReentrancyGuard on all public functions.
+
+### Integer Overflow (Pre-Solidity 0.8)
+
+```solidity
+uint8(255) + 1 == 0    // silent overflow
+uint8(0) - 1 == 255    // underflow → huge balance
+
+// Attack: balances[attacker] -= amount where amount > balance → huge balance
+// Post-0.8 risk: unchecked{} blocks reintroduce overflow
+// Also: (a * b) / c where a*b overflows before division
+```
+
+### Delegatecall Storage Collision
+
+```
+Proxy slot 0: owner         ← critical auth variable
+Impl slot 0: someVariable   ← innocuous-seeming variable
+
+Attacker calls implementation function that writes slot 0
+→ overwrites proxy's owner → becomes proxy owner
+```
+
+**Find**: `cast selectors <bytecode>` for function selector collisions (4-byte prefix).
+
+### tx.origin Authentication Bypass
+
+```solidity
+// Vulnerable:
+require(tx.origin == owner);  // phishing contract inherits tx.origin
+
+// Safe:
+require(msg.sender == owner);
+```
+
+### Signature Replay Attacks
+
+```
+Missing nonce: same signature reused multiple times (transfer replayed)
+Cross-chain replay: same contract on multiple chains, signature valid on all
+  Fix: include block.chainid in EIP-712 domain separator
+
+ecrecover returns address(0) on invalid sig → passes address(0) == owner check
+  Fix: require(signer != address(0))
+```
+
+### Randomness Manipulation
+
+```
+block.timestamp: miner manipulates ±15s
+blockhash(block.number-1): known at execution time
+block.prevrandao: post-merge, known beacon chain value
+
+Commit-reveal abuse: attacker refuses to reveal unfavorable outcome
+  Fix: enforce reveal timeout + deposit bond
+```
+
+### CREATE2 Pre-deployment Exploitation
+
+```
+Predict contract address → approve tokens to that address before deployment
+Deploy malicious contract at predicted address → drain approved tokens
+
+Also: metamorphic contracts (pre-EIP-6780):
+CREATE2 → selfdestruct → CREATE2 with same salt but DIFFERENT initCode
+→ proxy approvals/state stays, but implementation is now malicious
+```
+
+### Flash Loan Attack Checklist
+
+```
+✓ Does contract use AMM spot price (getReserves()) as oracle? → vulnerable
+✓ Does governance vote snapshot balance at vote time or proposal creation? → flash loan risk
+✓ Does first depositor set share price that causes rounding to 0? → inflation attack
+✓ Are ERC4626 vaults initialized with minimum liquidity? → inflation attack
+✓ Does any external call happen before state update? → reentrancy risk
+```

