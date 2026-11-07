@@ -19,6 +19,7 @@ Run all phases below without asking. Do not say "would you like me to run subfin
 4. Nuclei on live hosts → run after httpx confirms live hosts
 5. URL crawling → run automatically after httpx (not on-request, always)
 6. JS analysis and source map extraction → run after crawling
+
 ---
 
 # Shodan Reconnaissance and Pentesting
