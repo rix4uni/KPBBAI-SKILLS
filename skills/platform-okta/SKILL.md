@@ -5,6 +5,17 @@ sources: public-okta-docs, idp-redteam-knowledge, disclosed-incidents
 report_count: 8
 ---
 
+## AUTONOMOUS OPERATION
+
+When Okta is detected: start tenant discovery immediately, then work through the attack chain without asking between sections.
+
+- Tenant discovered → enumerate users → test authentication flows → check MFA factors — all without asking.
+- When a factor enumeration or spray window opens: execute it now (respecting lockout discipline defined in this skill).
+- When admin API surface is accessible: probe it immediately.
+- Only stop for: actions that could lock out real users at scale, or destructive admin operations.
+
+---
+
 ## When to use this skill
 
 Trigger when:

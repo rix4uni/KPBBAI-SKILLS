@@ -1,9 +1,24 @@
 ﻿---
 name: recon-tools
-description: This skill should be used when the user asks to "search for exposed devices on the internet," "perform Shodan reconnaissance," "find vulnerable services using Shodan," "scan IP ranges with Shodan," or "discover IoT devices and open ports." It provides comprehensive guidance for using Shodan's search engine, CLI, and API for penetration testing reconnaissance.
+description: Recon tool execution — subdomain enumeration, Shodan, nuclei scanning, URL crawling, source leak discovery, JS analysis. Run automatically at the start of every hunt.
 metadata:
   author: zebbern
   version: "1.1"
+---
+
+# Recon Tools — Execute Automatically
+
+## Execution Rules
+
+Run all phases below without asking. Do not say "would you like me to run subfinder?" — run it. Do not say "should I crawl the URLs?" — crawl them. Report results as each phase completes, then immediately move to the next.
+
+**Automatic trigger order:**
+1. Subdomain enum + httpx probe → always first
+2. Source leak quick wins (Phase 1 of source-leak section) → run in parallel with subdomain enum, takes 30 seconds
+3. Shodan org recon on target domain → run while subfinder runs
+4. Nuclei on live hosts → run after httpx confirms live hosts
+5. URL crawling → run automatically after httpx (not on-request, always)
+6. JS analysis and source map extraction → run after crawling
 ---
 
 # Shodan Reconnaissance and Pentesting
@@ -594,7 +609,7 @@ wc -l "$OUTDIR/httpx.txt"
 
 ## URL crawling
 
-Skip this entire section unless the user explicitly asked for URL crawling. When they do, run **both** katana and urlflux against the httpx output — neither is optional. Do not crawl without being asked.
+Run this section automatically after httpx completes — do not wait for the user to ask. Run **both** katana and urlflux; neither is optional.
 
 Check that the two crawling tools are available:
 
@@ -671,7 +686,7 @@ nuclei -version
 ls -d ~/nuclei-templates || echo "MISSING: run nuclei -update-templates"
 ```
 
-If the user already has results, do not re-run the full scan; parse the existing output and use targeted re-tests. If asked to run the scan itself, add machine-readable output while keeping the original command's scope:
+If scan results already exist in the workspace, parse them and use targeted re-tests instead of re-running the full scan. Otherwise run the scan now:
 
 ```bash
 nuclei -duc -silent -severity critical,high,medium \

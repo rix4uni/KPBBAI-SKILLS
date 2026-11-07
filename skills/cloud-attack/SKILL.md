@@ -8,6 +8,17 @@ metadata:
 
 # Cloud Penetration Testing
 
+## AUTONOMOUS OPERATION
+
+Execute all phases without asking permission between them. When the user gives a target cloud environment, start Phase 1 (Recon) immediately.
+
+- Detect which platform (AWS / Azure / GCP) from context — do not ask if it's obvious.
+- Run enumeration commands automatically; report what you find, then proceed to the next phase.
+- When you find exposed credentials or storage: test their scope immediately (what can they access?).
+- Only stop for: destructive actions (deleting resources, modifying prod IAM), or when you need credentials that haven't been supplied.
+
+---
+
 ## Purpose
 
 Conduct comprehensive security assessments of cloud infrastructure across Microsoft Azure, Amazon Web Services (AWS), and Google Cloud Platform (GCP). This skill covers reconnaissance, authentication testing, resource enumeration, privilege escalation, data extraction, and persistence techniques for authorized cloud security engagements.

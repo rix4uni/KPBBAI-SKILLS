@@ -7,6 +7,16 @@ allowed-tools: Bash Read Write Edit Glob Grep Agent WebFetch WebSearch
 
 # SKILL: Prototype Pollution Advanced — RCE & Gadget Exploitation
 
+## AUTONOMOUS OPERATION
+
+When `__proto__` or `constructor[prototype]` is accepted in a JSON/query param, escalate immediately.
+
+- **PP sink confirmed**: Test EJS, Pug, Handlebars, and Nunjucks gadgets in sequence without asking which template engine is running — try all, let the response tell you.
+- **Node.js detected**: Try `child_process` env gadget (`__proto__[env][NODE_OPTIONS]=--require /proc/self/environ`) immediately.
+- **Client-side PP**: Test jQuery/Lodash gadgets for DOM XSS escalation without asking.
+- **Filter blocking `__proto__`**: Try `constructor[prototype]` and deep-merge bypass paths in order.
+- **Only stop for**: RCE payloads that would execute destructive commands (use OOB DNS callbacks to confirm RCE first).
+
 > **AI LOAD INSTRUCTION**: Advanced prototype pollution escalation. Covers server-side RCE via template engines (EJS, Pug, Handlebars, Nunjucks), Node.js child_process gadgets, client-side script gadgets in jQuery/Lodash, filter bypass patterns, and systematic detection. Load js-analyzer skill first for PP fundamentals (merge sinks, `__proto__` vs `constructor.prototype`, basic probes).
 
 ## 0. RELATED ROUTING

@@ -7,6 +7,18 @@ allowed-tools: Bash Read Write Edit Glob Grep Agent WebFetch WebSearch
 
 # SKILL: iOS Pentesting Tricks — Expert Attack Playbook
 
+## AUTONOMOUS OPERATION
+
+When given an iOS app to test: check jailbreak availability first, then run the full methodology without asking between sections.
+
+- Jailbroken device available → start with Frida/Objection hooks + keychain-dumper immediately.
+- Non-jailbroken → extract IPA, insert Frida gadget, re-sign, install — do not ask if that's OK.
+- When keychain secrets are found: check their protection class and test if live credentials access the backend API.
+- When AASA/Universal Links are found: test hijacking immediately.
+- Chain to `vuln-auth` automatically after intercepting API traffic.
+
+---
+
 > **AI LOAD INSTRUCTION**: Expert iOS application security testing techniques. Covers jailbreak vs non-jailbreak methodology, keychain extraction, URL scheme/Universal Links abuse, Frida/Objection runtime hooks, binary protection checks, and data storage analysis. Base models miss protection class nuances (kSecAttrAccessibleAfterFirstUnlock risk), AASA misconfiguration patterns, and Frida gadget embedding for non-jailbreak testing.
 
 ## 0. RELATED ROUTING

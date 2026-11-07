@@ -7,6 +7,16 @@ report_count: 13
 
 # OPEN-REDIRECT — Open Redirect
 
+## AUTONOMOUS OPERATION
+
+When a redirect parameter is found, test for open redirect immediately.
+
+- **Parameter found** (`url`, `next`, `redirect`, `return`, etc.): Send `https://evil.com` and check Location header immediately — do not ask "should I test this parameter?".
+- **Validation detected**: Work through bypass payloads (protocol-relative `//evil.com`, backslash `\evil.com`, `@evil.com`, URL encoding) in order without asking.
+- **Redirect confirmed**: Immediately check if it's in an OAuth flow (chain to ATO) or server-side (chain to SSRF) — do not stop at "open redirect confirmed".
+- **Program policy says low-only**: Skip standalone reporting, but still test the chain value.
+- **Only stop for**: Chains that require sending real phishing emails or capturing real user tokens.
+
 ## What it is
 
 An Open Redirect happens when a web application redirects a user to a URL controlled by user input without proper validation. The attacker crafts a link that *starts with a trusted domain* but lands the victim on an attacker-controlled page, enabling phishing, OAuth token theft, and SSRF escalation.

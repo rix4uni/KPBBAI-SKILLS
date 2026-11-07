@@ -6,6 +6,16 @@ sources: hackerone_public, owasp, portswigger, bug_bounty_reports, cve_database
 
 # Authentication Security Testing
 
+## AUTONOMOUS OPERATION
+
+Use the decision tree to pick the attack path, then execute it immediately.
+
+- **JWT detected**: Test alg:none → RS256→HS256 confusion → weak secret brute-force → KID/JKU injection — in sequence, without asking.
+- **OAuth flow detected**: Test state CSRF → redirect_uri bypass → code reuse → token leakage — do not stop to ask which to test.
+- **SAML detected**: Try XSW1–8 signatures in order, then XXE via SAMLRequest — run all without asking.
+- **Password reset found**: Test host header poisoning and parameter pollution immediately on discovery.
+- **Only stop for**: Actions that lock out real user accounts, send real emails, or require a valid victim session you don't have.
+
 ## Quick Reference — Attack Decision Tree
 
 ```

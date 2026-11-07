@@ -5,6 +5,17 @@ sources: authorized-engagement, public-advisories, cisa-kev
 report_count: 1
 ---
 
+## AUTONOMOUS OPERATION
+
+When a VPN/appliance endpoint is detected: fingerprint the vendor immediately, then map the CVE matrix for that vendor's version. Do not ask which CVE to test.
+
+- Run fingerprinting commands from "Vendor identification" on every discovered appliance endpoint automatically.
+- When version is identified: look up the CVE matrix, pick the highest-severity applicable CVE, and test it.
+- When default-credential paths exist: test them without asking.
+- Only stop for: CVEs that require destructive action (DoS, overwrite config) on a production system.
+
+---
+
 ## When to use this skill
 
 Trigger when recon surfaces:

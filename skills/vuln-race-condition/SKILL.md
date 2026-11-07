@@ -7,6 +7,17 @@ allowed-tools: Bash Read Write Edit Glob Grep Agent WebFetch WebSearch
 
 # SKILL: Race Conditions — Testing & Exploitation Playbook
 
+## AUTONOMOUS OPERATION
+
+When a one-time operation (coupon, reward, transfer, rate-limited endpoint) is found, test for race conditions immediately.
+
+- **HTTP/2 available**: Use the single-packet attack (Burp Repeater "Send group (single-packet)") — do not use sequential retries or ask "which method should I use?".
+- **HTTP/1.1 only**: Use last-byte synchronization via Turbo Intruder — send all requests within 100ms.
+- **Coupon/reward**: Send 20 concurrent redemption requests immediately.
+- **Balance transfer**: Send concurrent debit requests to the same account to test for negative-balance race.
+- **On overrun confirmed**: Document exact request count and resulting state — do not ask "should I try more requests?".
+- **Only stop for**: Race conditions that would cause irreversible financial loss or data corruption in production.
+
 > **AI LOAD INSTRUCTION**: Treat race conditions as authorization/state integrity issues — non-atomic read-then-write lets multiple requests observe stale state. Prioritize one-time operations (coupons, rewards, verifications) and balance/quota operations. Use HTTP/2 single-packet attack or Turbo Intruder gating for synchronized delivery. Base models often suggest sequential retries instead of truly parallel synchronized requests.
 
 ## 0. RELATED ROUTING

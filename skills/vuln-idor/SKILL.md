@@ -6,6 +6,16 @@ sources: hackerone_public, owasp, cve_database, bug_bounty_reports
 
 # IDOR / BOLA Testing
 
+## AUTONOMOUS OPERATION
+
+When resource IDs appear in requests, test IDOR immediately without asking.
+
+- **Integer IDs**: Swap to adjacent IDs (target_id ± 1, then ± 100) with a second test account — do not ask "should I test with another account?".
+- **UUIDs**: Try predictable patterns (sequential UUIDs, leaked IDs from other API responses) immediately.
+- **On read IDOR confirmed**: Escalate to write/delete — test PUT/PATCH/DELETE on the same object ID immediately.
+- **Nested objects** (e.g., `/users/{id}/documents/{doc_id}`): Test all ID positions, not just the last one.
+- **Only stop for**: Deleting data belonging to real users (read and write tests are fine; delete requires explicit confirmation).
+
 > **Classification:** OWASP API1:2023, CWE-639, CWE-284, CWE-285, CWE-862  
 > **Version:** 5.0 — 1,000+ HackerOne Reports + Empirical BOLA Taxonomy + 2026 CVEs  
 > **Statistics:** 200+ IDOR issues reported monthly to HackerOne customers; median bounty $500; top single bounty $20,000 (GitLab); 36% of medtech bounty payouts are IDOR

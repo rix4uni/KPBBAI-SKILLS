@@ -5,6 +5,18 @@ sources: github, authorized-engagement
 report_count: 1
 ---
 
+## AUTONOMOUS OPERATION
+
+When SharePoint headers are detected: fingerprint the version immediately, then run the attack chain without asking.
+
+- Headers detected → check version via `MicrosoftSharePointTeamServices` or path hints → map applicable CVEs → test immediately.
+- SP2013 on public internet: treat every CVE since April 2023 as unpatched — test all applicable ones.
+- `/_vti_bin/Authentication.asmx` exists → test SOAP login bypass immediately (no rate limit on most farms).
+- ToolShell preconditions (anonymous ToolPane + FormDigest) → test the chain now.
+- Only stop for: actions that modify SharePoint content or cause service disruption.
+
+---
+
 ## Crown Jewel Targets
 
 SharePoint Server (on-prem) is one of the richest enterprise attack surfaces in 2025-2026 bug bounty / red-team work. Three forces converge:

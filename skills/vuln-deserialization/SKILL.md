@@ -6,6 +6,16 @@ sources: hackerone_public, cve_database, exploit_db, owasp, portswigger
 
 # Insecure Deserialization Testing
 
+## AUTONOMOUS OPERATION
+
+When serialized data is found in a request, test for deserialization vulnerabilities immediately.
+
+- **Java (rO0AB or aced0005)**: Run ysoserial with CommonsCollections1-7 and Spring gadget chains against the endpoint — do not ask which chain to try first.
+- **PHP (O:N or a:N)**: Test object injection with a POP chain targeting dangerous magic methods (__wakeup, __destruct) immediately.
+- **.NET (AAEAAAD or ViewState)**: Try TypeConfuseDelegate and ObjectDataProvider chains via ysoserial.net.
+- **On DNS/OOB callback**: Confirm deserialization, then escalate to RCE payload immediately.
+- **Only stop for**: Payloads that would cause data destruction, service crashes, or affect other users' data.
+
 ## Core Principle
 
 A deserialization vulnerability is **not** proven by finding serialized data or a dangerous API. It is established by demonstrating that lower-trust data can influence an unsafe object-reconstruction process across a security boundary and produce an unauthorized security-relevant effect under actual runtime conditions.

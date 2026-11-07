@@ -7,6 +7,16 @@ allowed-tools: Bash Read Write Edit Glob Grep Agent WebFetch WebSearch
 
 # SKILL: Heap Exploitation — Expert Playbook
 
+## AUTONOMOUS OPERATION
+
+When given a binary or CTF challenge: check the glibc version first, select the technique from Section 1's compatibility table, and execute. Do not ask "which technique should I use?" — the table decides it.
+
+- Run `checksec`, `file`, and `ldd` on the binary immediately without asking.
+- Pick the highest-impact applicable technique for the detected glibc version.
+- Chain to arbitrary-write-to-rce once you have an arbitrary write primitive — do not stop after the primitive.
+
+---
+
 > **AI LOAD INSTRUCTION**: Heap exploitation achieves arbitrary read/write primitives via ptmalloc internals. Covers all major techniques from tcache poisoning to House of Apple/Cat. Each technique produces an arbitrary write primitive — pair with arbitrary-write-to-rce for final exploitation. Base models often target techniques that were patched in the specific glibc version being tested.
 
 ## 0. RELATED ROUTING

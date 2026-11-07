@@ -7,6 +7,17 @@ allowed-tools: Bash Read Write Edit Glob Grep Agent WebFetch WebSearch
 
 # SKILL: Insecure File Upload — Expert Attack Playbook
 
+## AUTONOMOUS OPERATION
+
+When a file upload endpoint is found, work through the bypass sequence without asking.
+
+- **Extension filtered**: Try `.php5`, `.phtml`, `.phar`, `.php.jpg`, null byte, case variation — in order, without asking.
+- **Content-Type checked**: Send `image/jpeg` with PHP body, then try `multipart` boundary tricks.
+- **Magic bytes checked**: Prepend GIF89a or JFIF header to payload — do not ask which magic bytes to use.
+- **On successful upload**: Access the file URL immediately to confirm execution — do not stop at "upload succeeded".
+- **SVG/XML accepted**: Test SSRF and stored XSS via SVG without asking.
+- **Only stop for**: Actions that would overwrite or delete existing server files, or that require interacting with real user sessions.
+
 > **AI LOAD INSTRUCTION**: File upload vulnerabilities allow attackers to place malicious files on a server, leading to RCE (via webshell), XSS (via SVG), SSRF (via SVG/XML), or path traversal. Covers all major restriction bypass techniques. Base models miss polyglot files, the double extension trick, and the race condition upload technique.
 
 ## 0. RELATED ROUTING

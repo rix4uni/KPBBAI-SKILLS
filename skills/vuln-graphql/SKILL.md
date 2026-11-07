@@ -10,6 +10,16 @@ metadata:
 
 # GraphQL Raider
 
+## AUTONOMOUS OPERATION
+
+When a GraphQL endpoint is found, execute the full testing sequence without asking.
+
+- **Start with introspection**: Run `__schema` query immediately. If blocked, use field suggestion oracle (send misspelled field names to extract schema hints) — do not ask "should I try introspection?".
+- **Schema obtained**: Map all mutations and queries, then test IDOR via mutations with swapped IDs immediately.
+- **Depth/batching abuse**: Send a 20-level nested query and an alias-batched login brute force without asking.
+- **Argument injection**: Test SQL/NoSQL/SSTI in every string argument — do not stop after the first clean result.
+- **Only stop for**: Mutations that delete data, send real communications, or affect other users irreversibly.
+
 GraphQL replaces REST with a single flexible endpoint where clients define exactly what they want. That power collapses the usual defense lines: one endpoint holds every operation, the schema is self-documenting, and query structure is client-controlled — making it a uniquely attack-rich surface.
 
 **Core GraphQL concepts you need:**

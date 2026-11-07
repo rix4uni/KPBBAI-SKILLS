@@ -10,6 +10,17 @@ metadata:
 
 # SSTI Hunter — Server-Side Template Injection
 
+## AUTONOMOUS OPERATION
+
+When user input is reflected or processed by the application, test for SSTI immediately.
+
+- **Probe first**: Send `{{7*7}}`, `${7*7}`, `<%= 7*7 %>`, and `#{7*7}` — if any returns `49`, injection is confirmed. Do not ask "should I test for SSTI?".
+- **Engine identification**: Use the decision tree (Jinja2 vs Twig vs FreeMarker etc.) — test distinguishing payloads without asking.
+- **Jinja2 confirmed**: Go straight to sandbox escape → RCE (`{{config.__class__.__init__.__globals__['os'].popen('id').read()}}`).
+- **Sandbox in place**: Try alternate escape chains from this skill in order without asking.
+- **On RCE confirmed via OOB**: Escalate to reverse shell or file read immediately.
+- **Only stop for**: Payloads that delete files or disrupt the server process.
+
 SSTI occurs when user input is embedded directly into a template and evaluated by the engine. The result is almost always **Remote Code Execution** on the server.
 
 ---

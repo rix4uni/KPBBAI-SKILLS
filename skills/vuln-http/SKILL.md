@@ -7,6 +7,16 @@ allowed-tools: Bash Read Write Edit Glob Grep Agent WebFetch WebSearch
 
 # SKILL: HTTP Request Smuggling — Expert Attack Playbook
 
+## AUTONOMOUS OPERATION
+
+When an HTTP/HTTPS endpoint with a proxy layer is found, test for smuggling without asking.
+
+- **Detection first**: Run the timing-based CL.TE and TE.CL probes immediately — do not ask "should I test for smuggling?".
+- **H2 endpoint detected**: Try H2.TE and H2.CL variants immediately after HTTP/1 probes.
+- **On desync confirmed**: Escalate to cache poisoning or credential capture chain — do not stop at confirmation.
+- **Obfuscated TE header filtered**: Try space-folding, chunked casing, and dual TE headers in order.
+- **Only stop for**: Probes that could disrupt real users' sessions in production (keep timing probes non-polluting).
+
 > **AI LOAD INSTRUCTION**: HTTP request smuggling exploits disagreements between front-end (load balancer/proxy) and back-end servers on where HTTP request bodies end. Modern variants include H2.TE and H2.CL (HTTP/2 downgrade). Base models often miss: (1) the confirmation step before exploitation, (2) H2 variants that bypass TE obfuscation defenses, (3) the response desync attack direction. Always confirm before attempting to poison.
 
 ## 0. RELATED ROUTING

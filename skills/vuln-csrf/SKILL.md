@@ -7,6 +7,16 @@ allowed-tools: Bash Read Write Edit Glob Grep Agent WebFetch WebSearch
 
 # SKILL: CSRF — Cross-Site Request Forgery Attack Playbook
 
+## AUTONOMOUS OPERATION
+
+When a state-changing request is found, test CSRF protections immediately without asking.
+
+- **Token present**: Try removing it, sending empty string, then sending a valid token from another session — in sequence, without asking.
+- **SameSite=Lax**: Test top-level GET navigation bypass and 2-minute window bypass immediately.
+- **JSON Content-Type**: Try `text/plain` with JSON body, then `application/x-www-form-urlencoded` with JSON-shaped value — do not ask which to try first.
+- **On bypass confirmed**: Build the full PoC HTML and confirm impact — do not stop at "token is missing".
+- **Only stop for**: Submitting the PoC in a way that triggers actions affecting real users beyond the test account.
+
 > **AI LOAD INSTRUCTION**: CSRF exploits the browser's automatic cookie inclusion to forge authenticated requests from the victim's browser. Covers all major CSRF protection bypass techniques including SameSite=Lax bypass, JSON CSRF, CORS misconfig chains, CSPT2CSRF, and OAuth state parameter abuse. Base models miss SameSite=Lax top-level navigation bypass and CSPT2CSRF entirely.
 
 ## 0. RELATED ROUTING

@@ -5,6 +5,35 @@ description: Entry point router for every bug bounty hunt. Read this FIRST. Anal
 
 # Bug Bounty Hunt Router — Read This First
 
+## AUTONOMOUS OPERATION — NON-NEGOTIABLE RULES
+
+These rules apply for the entire hunt session. Read once, obey always.
+
+**1. Never ask permission for standard actions.**
+Recon, crawling, fingerprinting, sending payloads, reading responses — do all of this without asking. The user gave you the domain. That is your authorization to hunt.
+
+**2. Never present a list of options and wait.**
+"Do you want me to do A, B, or C?" is forbidden. You decide. Pick the highest-impact action and execute it. Report what you did and what you found.
+
+**3. Never describe what you *could* do. Do it.**
+"I could run a katana crawl to discover routes" → wrong. Run the crawl. Show results.
+
+**4. Only pause when ALL THREE are true:**
+- The action is irreversible OR touches production data in a destructive way
+- AND it goes clearly beyond testing (e.g. deleting records, sending emails to real users, purchasing items)
+- AND there is no way to safely test with a benign payload first
+
+**5. Chain actions automatically.**
+Recon finds a login → immediately test auth vulns. Find a file upload → immediately probe it. Find an API → immediately run API checks. Do not stop between phases to report and wait.
+
+**6. Report as you go, then keep hunting.**
+When you find something: state it in one line, state its severity, then continue to the next test. Do not stop the entire hunt to write a report.
+
+**7. When you find a critical bug:**
+Confirm impact with ONE safe additional test, then stop and report fully. Do not ask if you should confirm it — confirm it.
+
+---
+
 You are starting a bug bounty hunt. Do NOT load any other skill until you have read this file completely and built your skill list from the decision trees below.
 
 ## How This Works

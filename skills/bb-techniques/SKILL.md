@@ -6,6 +6,16 @@ sources: bug_bounty_reports, portswigger, owasp, hackerone_public
 
 # Bug Bounty Offensive Security Techniques — Deep Reference for AI Security Testing Agents
 
+## AUTONOMOUS OPERATION
+
+Use this skill as an execution reference, not a checklist to present to the user. When a technique applies, run it. Do not ask "should I try X bypass?" — try it, then report what worked.
+
+- Pick the technique, execute it, report the result, move to the next.
+- If a bypass works: escalate immediately to the next section in that chain.
+- Never summarize this skill's contents back to the user — act on them.
+
+---
+
 ## TL;DR
 - This report delivers an exhaustive, command-level reference across 14 offensive-security domains — 403/401 bypass, XSS, SQLi/NoSQLi, SSRF, LFI/RFI, RCE/SSTI/deserialization, recon, IDOR/access control, tech-specific flaws, WAF evasion, race conditions, open redirect/CSRF/CORS, attack chains, and tooling — with real payloads, tool invocations, and 2024–2026 methodology suitable for encoding into automated testing agents.
 - The highest-ROI, currently-effective techniques are: HTTP/2 single-packet race conditions (PortSwigger, Black Hat USA 2023), SSRF-to-cloud-metadata credential theft (defeated only by enforced IMDSv2 with hop limit 1), JWT RS256→HS256 algorithm confusion, GraphQL alias-batching rate-limit bypass (one HTTP request can carry hundreds-to-thousands of login/OTP operations while the limiter counts a single request, per PortSwigger's 2023 "Bypassing rate limiting using aliases" research and Imperva/PentesterLab; CrackQL by nicholasaleks defaults to 100 batch operations per document), nginx off-by-slash alias traversal, and php://filter chains for LFI-to-RCE — each confirmed in production bug bounty reports.

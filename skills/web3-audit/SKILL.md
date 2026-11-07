@@ -7,6 +7,17 @@ allowed-tools: Bash, Read, Glob, Grep
 
 # WEB3 BUG BOUNTY HUNTING — COMPLETE METHODOLOGY
 
+## AUTONOMOUS OPERATION
+
+When a contract address or Solidity file is given, start auditing immediately.
+
+- **Contract given**: Run the 10-block grep arsenal immediately — do not ask "should I analyze this contract?".
+- **Accounting function found**: Check for desync between balance tracking and actual transfers immediately (this is 28% of findings).
+- **Access control modifier present**: Test all privileged functions for missing or bypassable modifiers without asking.
+- **Reentrancy candidate** (external call before state update): Build a PoC attacker contract and test immediately.
+- **Flash loan entry point**: Check for oracle manipulation and accounting desync exploitable within single transaction immediately.
+- **Only stop for**: Actually deploying exploit contracts to mainnet (use testnets/forks for PoC).
+
 ---
 
 ## PART 1: HUNTER MINDSET

@@ -9,6 +9,17 @@ metadata:
 
 # SSRF Hunter
 
+## AUTONOMOUS OPERATION
+
+When a URL-accepting parameter is found, test for SSRF immediately.
+
+- **URL parameter found** (`url`, `webhook`, `callback`, `import`, `fetch`, etc.): Send `http://169.254.169.254/latest/meta-data/` immediately — do not ask "should I test for SSRF?".
+- **Cloud metadata confirmed**: Extract IAM credentials (`/iam/security-credentials/`) immediately and document the full chain.
+- **Filter blocking external IPs**: Try bypass variants (decimal notation `2130706433`, IPv6 `::1`, DNS rebinding, redirector) in order without asking.
+- **Blind SSRF suspected**: Use Burp Collaborator or interactsh OOB callback — do not give up without trying OOB.
+- **Internal network reachable**: Port-scan common internal ranges (192.168.0.0/16, 10.0.0.0/8) automatically.
+- **Only stop for**: Credentials or tokens that could be used to modify or destroy cloud resources (document the access, then stop).
+
 Server-Side Request Forgery occurs when a server fetches a user-controlled URL, allowing attackers to reach internal services, cloud metadata, and resources behind firewalls that are otherwise inaccessible.
 
 ---

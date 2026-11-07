@@ -5,6 +5,18 @@ sources: alex-birsan-dependency-confusion, supply-chain-research, github-actions
 report_count: 12
 ---
 
+# Supply Chain Attack Surface
+
+## AUTONOMOUS OPERATION
+
+When a target has a public GitHub org or JS bundles, run supply-chain recon immediately.
+
+- **Public GitHub org found**: Check all `.github/workflows/*.yml` for injection sinks (`run: echo ${{ github.event.pull_request.title }}`) — do not ask "should I check CI/CD?".
+- **Internal package name found in bundle**: Check npm/PyPI for namespace availability immediately — document squatting candidates.
+- **Docker image found**: Pull and inspect for secrets/credentials in layers without asking.
+- **SBOM or package-lock.json accessible**: Mine for internal registry URLs and unpublished package names immediately.
+- **Only stop for**: Actually publishing a package to npm/PyPI/PyPI (recon and identification only — no publishing without explicit written sign-off).
+
 ## When to use
 
 Trigger when:

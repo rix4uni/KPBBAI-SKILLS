@@ -7,6 +7,16 @@ allowed-tools: Bash Read Write Edit Glob Grep Agent WebFetch WebSearch
 
 # SKILL: NoSQL Injection — Expert Attack Playbook
 
+## AUTONOMOUS OPERATION
+
+When a MongoDB-style JSON query or filter parameter is found, test for NoSQL injection immediately.
+
+- **Login form**: Try `{"$ne": null}` on username and password fields immediately — do not ask "should I test NoSQL bypass?".
+- **Array/object params**: Test bracket notation (`param[$ne]=x`) and JSON body operator injection in parallel.
+- **Login bypass confirmed**: Escalate to `$regex` blind extraction of valid usernames/passwords immediately.
+- **Redis/CouchDB detected**: Switch to protocol-specific injection patterns from this skill without asking.
+- **Only stop for**: Payloads that could destroy data (use read-only operators first, escalate to write only to confirm impact).
+
 > **AI LOAD INSTRUCTION**: NoSQL injection is fundamentally different from SQL injection. Covers MongoDB operator injection, authentication bypass, blind extraction via $regex, aggregation pipeline injection, and Redis/CouchDB specific attacks. Very commonly missed by testers who only know SQLi patterns. Base models often miss the bracket-notation PHP injection form and the blind $regex oracle technique.
 
 ## 0. RELATED ROUTING

@@ -8,6 +8,15 @@ sources: community, public_research
 
 Payloads, bypass tables, wordlists, and submission rules.
 
+## AUTONOMOUS OPERATION
+
+Use this skill as an execution reference — look up the payload, then use it. Do not summarize the section or ask the user what to test.
+
+- **Payload lookup**: Find the relevant section (XSS/SSRF/SQLi/XXE/etc.), pick the most context-appropriate payload, and use it immediately.
+- **On reflection**: If a payload reflects in the response, escalate to the full chain (cookie theft, SSRF to metadata, blind injection confirmation) without asking.
+- **Bypass context**: If the first payload is filtered, work through the bypass table in order. Do not ask which bypass to try.
+- **Only stop for**: Actions that send real emails to users, modify production data, or require a credential you do not have.
+
 ---
 
 ## XSS PAYLOADS

@@ -7,6 +7,17 @@ report_count: 24
 
 # HUNT-NODEJS — Node.js Specific Vulnerabilities
 
+## AUTONOMOUS OPERATION
+
+When Node.js/Express is detected: run Phase 1 fingerprinting immediately, then proceed through all attack phases without asking.
+
+- Fingerprint confirms Node.js → start prototype pollution testing (Phase 2) right away.
+- When `__proto__` is accepted in a JSON body: escalate to RCE chain immediately — do not stop to ask.
+- package.json exposed → extract dependency versions → check each against known CVEs automatically.
+- Chain findings: prototype pollution primitive found → hunt for sinks (`child_process`, `vm`, template engines) without asking.
+
+---
+
 ## Crown Jewel Targets
 
 Prototype Pollution reaching a sink in Node.js backend = Critical RCE.

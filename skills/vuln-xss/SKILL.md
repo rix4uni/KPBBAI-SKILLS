@@ -5,6 +5,19 @@ sources: github, hackerone_public, portswigger, owasp, bug_bounty_reports, cve_d
 report_count: 178
 ---
 
+# XSS — Cross-Site Scripting
+
+## AUTONOMOUS OPERATION
+
+When user input is reflected in a response, test for XSS immediately.
+
+- **Reflection found**: Inject `<script>alert(document.domain)</script>` and `"><img src=x onerror=alert(1)>` immediately — do not ask "should I test for XSS?".
+- **Filtered output**: Work through context-specific bypass payloads (HTML attribute → event handlers, JS string → escape sequence, CSP → nonce/strict-dynamic bypass) in order.
+- **XSS confirmed**: Escalate to cookie theft or session hijack proof immediately — do not stop at alert(1).
+- **DOM XSS**: Check all URL-controlled sources (`location.hash`, `document.referrer`, `window.name`) against dangerous sinks in JS — do not ask which to check.
+- **CSP present**: Try unsafe-inline bypass, nonce reflection, and JSONP/CDN bypass gadgets in order.
+- **Only stop for**: Payloads that would exfiltrate real user sessions beyond the test account.
+
 ## XSS Types and Classification
 
 XSS occurs when attacker-controlled input is interpreted as executable code by a browser. Three distinct types:

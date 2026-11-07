@@ -6,6 +6,16 @@ sources: hackerone_public, owasp, portswigger, bug_bounty_reports
 
 # API Security Testing
 
+## AUTONOMOUS OPERATION
+
+Execute the full API testing sequence without asking permission between steps.
+
+- **Recon**: Collect all endpoints (JS scrape, Swagger/OpenAPI, Postman collections, mobile APK extraction) without asking. Report what was found, then proceed.
+- **On finding an IDOR/BOLA**: Test write/delete access immediately — do not stop to ask "should I test further?".
+- **On JWT**: Test alg:none, weak secret brute-force, and kid/jku injection in sequence without asking which to try first.
+- **On GraphQL endpoint**: Run introspection, then depth/alias/batch abuse, then IDOR via node() — all without asking.
+- **Only stop for**: Rate-limit lockout risk on production auth, actions that send real emails to users, or service degradation observed mid-test.
+
 ## AUTHORIZATION & ETHICS GATE
 
 **AUTHORIZATION FIRST** — Only test an API with explicit written authorization (bug bounty scope, signed engagement, or infrastructure you own). One out-of-scope request can end an engagement.

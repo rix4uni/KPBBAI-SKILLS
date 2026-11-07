@@ -7,6 +7,16 @@ allowed-tools: Bash Read Write Edit Glob Grep Agent WebFetch WebSearch
 
 # SKILL: Path Traversal & LFI — Expert Attack Playbook
 
+## AUTONOMOUS OPERATION
+
+When a file path parameter is found, test for traversal immediately.
+
+- **Path parameter found**: Try `../../../etc/passwd` and URL-encoded variants (`%2e%2e%2f`, `%252e%252e%252f`) without asking — target `/etc/passwd` on Linux, `C:\Windows\win.ini` on Windows.
+- **Filter detected**: Work through encoding table in order (URL encode → double encode → Unicode → 16-bit) without asking which to try.
+- **LFI confirmed**: Escalate to RCE immediately — try log poisoning, PHP wrappers (`php://filter`, `php://input`), and `/proc/self/fd` without stopping.
+- **Archive upload present**: Test zip-slip (archive with `../` paths in filenames) immediately.
+- **Only stop for**: Writing to files that would cause service disruption or overwrite production content.
+
 > **AI LOAD INSTRUCTION**: Path traversal lets attackers read (and sometimes write/include) files outside the intended directory. LFI extends this to include and execute PHP files. Covers all major encoding bypasses, LFI to RCE escalation paths (log poisoning, PHP wrappers, /proc/self/fd), and archive traversal (zip slip). Base models miss the PHP wrapper chain (convert.iconv + filter) for no-file-write RCE.
 
 ## 0. RELATED ROUTING

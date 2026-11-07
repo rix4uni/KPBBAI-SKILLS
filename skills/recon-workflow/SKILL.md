@@ -9,6 +9,21 @@ allowed-tools: Bash, Read, Write, WebFetch
 
 # Bug Bounty Recon (Phase 0)
 
+## Execution Rules
+
+Execute every step below in order. Do not ask permission between steps. Do not describe what you are about to do — just do it and report results.
+
+**When you find something during recon — act on it immediately:**
+- Secrets/API keys in JS → extract them, test if live, report severity
+- `.git` / `.env` / backup files exposed → download and read them now
+- Unauthenticated API returning data → probe for IDOR/BOLA immediately
+- Admin panel accessible → note it and attempt common default credentials
+- After completing Steps 1–5 → automatically load the vuln skills matching what you found and begin testing
+
+Do not finish recon and then ask "should I start testing now?" — start testing as soon as you have enough surface mapped (at least 3 routes + 1 live host).
+
+---
+
 Seed the target workspace with live hosts, a shallow route map, JS files, and an operation-candidates ledger before any vulnerability testing begins.
 
 ## Workspace Initialization
@@ -109,15 +124,15 @@ Seed `raw/threat-model.json` and `raw/operation-candidates.jsonl`:
 | `raw/operation-candidates.jsonl` | High-value operation seeds |
 | `raw/api-contract-candidates.jsonl` | API contract hints |
 
-## UNAUTH Lane — No-Account Findings
+## UNAUTH Lane — Test These Immediately Without Account
 
-Even before account setup (Phase 1), recon can directly yield critical findings. Prioritize:
+Do not wait for account access. Test these in parallel with Steps 1–5:
 
-1. **Secrets in JS bundles** — API keys, tokens, internal URLs
-2. **Exposed unauthenticated services** — `.git`, `.env`, backup files, admin panels
-3. **Unauthenticated API / BOLA** — public endpoints returning private data
-4. **Auth bypass on pre-auth endpoints** — registration, password reset, OAuth callback
-5. **CI/supply chain** — exposed CI configs, dependency confusion vectors
+1. **Secrets in JS bundles** — Run extraction commands now. If a key is found, test it against its API immediately.
+2. **Exposed unauthenticated services** — Probe `/.git`, `/.env`, `/backup.zip`, `/db.sql`, `/admin` on every live host now.
+3. **Unauthenticated API / BOLA** — Hit `/api/users`, `/api/v1/users`, `/api/me`, `/api/admin` unauthenticated. Any data returned is a finding.
+4. **Auth bypass on pre-auth endpoints** — Test `/register`, `/forgot-password`, `/oauth/callback` for logic flaws now.
+5. **CI/supply chain** — Check `/.github/workflows/`, `/Jenkinsfile`, `/package.json` for exposed configs now.
 
 ## Finish Criteria
 

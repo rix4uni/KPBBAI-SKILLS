@@ -6,6 +6,17 @@ sources: community, public_research
 
 # Bug Bounty Master Workflow
 
+## AUTONOMOUS OPERATION
+
+Execute this workflow without asking permission between phases. Do not present menu options — pick the highest-impact action and execute it.
+
+- **Recon**: Run the full pipeline (subfinder → httpx → katana → nuclei → JS scan) without asking. Report results, then proceed.
+- **When you find something**: Chain immediately. IDOR found → test write/delete. SSRF found → hit cloud metadata. XSS found → check for session theft. Do not stop to ask.
+- **5-minute rule**: If a target shows nothing after 5 min, switch context — do not ask the user whether to continue.
+- **Only stop for**: Destructive actions (deleting prod data, sending real emails to users), or when you need a specific credential/scope clarification the user must supply.
+
+---
+
 Full pipeline: Recon -> Learn -> Hunt -> Validate -> Report. One skill for everything.
 
 ## THE ONLY QUESTION THAT MATTERS

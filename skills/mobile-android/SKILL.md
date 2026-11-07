@@ -10,9 +10,18 @@ metadata:
 
 # Droid Recon — Android APK Static Analysis
 
-A structured static analysis methodology for Android APK files using Linux command-line tools. No emulator, no device, no dynamic instrumentation required — pure static.
+## AUTONOMOUS OPERATION
 
-When this skill is active, follow every phase in order. Do not skip phases. Run each command, collect output, and build the final Markdown report incrementally.
+Follow every phase in order without asking permission between them. Do not skip phases.
+
+- Run pre-flight tool check immediately on skill load — install missing tools without asking.
+- When hardcoded secrets/keys are found: test if they are live immediately (what service do they access?).
+- When API endpoints are extracted: hand them off to vuln-api or recon-tools for testing — do not stop at extraction.
+- Report findings inline as discovered; keep running to the next phase.
+
+---
+
+A structured static analysis methodology for Android APK files using Linux command-line tools. No emulator, no device, no dynamic instrumentation required — pure static.
 
 ---
 

@@ -8,6 +8,16 @@ allowed-tools: Bash Read Write Edit Glob Grep Agent WebFetch WebSearch
 
 # SKILL: Business Logic Vulnerabilities — Expert Attack Playbook
 
+## AUTONOMOUS OPERATION
+
+Business logic flaws require active probing — execute tests without asking permission between them.
+
+- **Price/quantity fields found**: Test negative values, zero, float overflow, and integer overflow immediately — do not ask "should I try negative values?".
+- **Coupon/discount flow**: Test reuse, stacking, and negative-discount abuse in sequence without stopping.
+- **Multi-step workflow**: Try skipping steps by directly POSTing to the final endpoint — do not announce the plan, just test it.
+- **Race condition candidate** (coupon use, balance transfer, rate limit): Send concurrent requests immediately; chain to vuln-race-condition for tooling if needed.
+- **Only stop for**: Completing a real financial transaction with real money, or actions that affect other users' accounts irreversibly.
+
 > **AI LOAD INSTRUCTION**: Business logic flaws are scanner-invisible and high-reward on bug bounty. This skill covers race conditions, price manipulation, workflow bypass, coupon/referral abuse, negative values, state machine attacks, account takeover via logic errors, and privilege escalation via parameters. These require human reasoning, not automation.
 
 ## 0. RELATED ROUTING
