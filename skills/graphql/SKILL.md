@@ -1,5 +1,5 @@
----
-name: graphql-raider
+﻿---
+name: graphql
 description: Complete GraphQL security testing methodology — introspection abuse and schema enumeration, field suggestion oracle (when introspection is disabled), query depth/batching DoS, alias-based rate limit bypass, injection through arguments (SQL/NoSQL/SSTI), broken object-level and field-level authorization (IDOR via mutations), CSRF via GET mutations and content-type bypass, subscription hijacking via WebSocket, circular fragment DoS, and mass assignment via mutations. Trigger when the user finds a /graphql endpoint, sees GraphQL queries in traffic, wants to test a GraphQL API for vulnerabilities, needs to enumerate a hidden schema without introspection, wants to bypass rate limits or brute-force credentials through GraphQL, or needs to escalate privileges through mutations.
 license: MIT
 metadata:
@@ -1887,5 +1887,6 @@ someone else's balance" is real impact; "I sent a malformed amount and got a 400
   live financial account is never included verbatim.
 - **`triage-validation`** — apply Gate 0 above before drafting; a fintech program's triage team
   will kill anything without a demonstrated ledger state change immediately.
+
 
 

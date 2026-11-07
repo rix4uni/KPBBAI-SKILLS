@@ -1,5 +1,5 @@
----
-name: business-logic-vulnerabilities
+﻿---
+name: business-logic
 description: Business logic vulnerability playbook — price/quantity manipulation, coupon/discount abuse, race conditions, workflow step-skip, payment bypass, privilege escalation via parameters, account takeover via logic errors, subscription tier confusion, CAPTCHA abuse, and comprehensive checklists for e-commerce/SaaS/financial/auth domains. Scanner-invisible and high-reward on bug bounty.
 sources:
   - hack-skills/skills/business-logic-vulnerabilities
@@ -898,3 +898,4 @@ The following real, verified bug-bounty / coordinated-disclosure cases extend th
 - **`hunt-ato`** — Logic bugs in password reset, email change, and recovery flows are core ATO paths. Chain primitive: business logic (email change accepts without re-auth) + `hunt-ato` Path 2 → silent victim email swap → password reset to attacker mailbox.
 - **`security-arsenal`** — Load the Business-Logic Probe Checklist (negative quantity, decimal overflow, currency swap, step-skip via direct URL nav, state-machine reverse) and the Always-Rejected list to avoid filing self-inflicted bugs.
 - **`triage-validation`** — Apply the 7-Question Gate (especially Q4 "Is this exploitable by an outside attacker without unrealistic preconditions?"): logic bugs need a concrete dollar/PII/state impact, not just "the flow looks weird".
+

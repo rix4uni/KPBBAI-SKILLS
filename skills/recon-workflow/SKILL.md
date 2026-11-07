@@ -1,5 +1,5 @@
----
-name: bb-recon
+﻿---
+name: recon-workflow
 description: Bug bounty Phase 0 recon — live host discovery, shallow browser map, JS download, operation-candidates seeding. Use at the start of any bug bounty engagement before access setup or vulnerability testing.
 sources:
   - bug-bounty-hunting-prompts/phases/phase-00-recon.md
@@ -257,3 +257,4 @@ Jenkins:        /jenkins/      /hudson/  "X-Jenkins" header
 /robots.txt (look for disallowed paths)
 /sitemap.xml (enumerate hidden routes)
 ```
+

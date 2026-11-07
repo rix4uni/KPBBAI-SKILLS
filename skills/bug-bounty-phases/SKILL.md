@@ -1,5 +1,5 @@
 ﻿---
-name: bb-phases
+name: bug-bounty-phases
 description: Bug bounty Phase 1 account setup — create two test accounts (A and B), build the resource graph, and dispatch parallel registrar + walker subagents. Use after recon before any vulnerability sweep.
 sources:
   - bug-bounty-hunting-prompts/phases/phase-01-access.md
@@ -804,4 +804,5 @@ endpoints append --json '{"shape": "/api/files/{id}", "class": "idor", "verdict"
 ## Stop Condition
 
 Stage B is complete when all 47 coverage matrix rows have a verdict (CONFIRMED / NO-ISSUE / BLOCKED) for at least one representative endpoint in that class.
+
 

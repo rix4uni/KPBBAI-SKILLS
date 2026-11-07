@@ -1,5 +1,5 @@
----
-name: prototype-pollution-advanced
+﻿---
+name: prototype-pollution
 description: Advanced prototype pollution — server-side RCE via EJS/Pug/Handlebars/Nunjucks template gadgets, Node.js child_process shell injection, client-side gadgets (jQuery/Lodash/Angular/Vue), detection techniques, and filter bypass. Load js-analyzer skill for PP fundamentals first.
 sources: hack_skills, bug_bounty_reports
 allowed-tools: Bash Read Write Edit Glob Grep Agent WebFetch WebSearch
@@ -276,3 +276,4 @@ Prototype pollution confirmed?
     ├── Inject {"__proto__":{"polluted":"yes"}} → check in responses
     └── Error-based: {"__proto__":{"toString":1}} → check for 500 errors
 ```
+

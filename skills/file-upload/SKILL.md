@@ -1,5 +1,5 @@
----
-name: upload-insecure-files
+﻿---
+name: file-upload
 description: Insecure file upload playbook — extension bypass (.php.jpg, null byte, case tricks), content-type bypass, magic bytes bypass, polyglot files, path traversal in filename, race condition upload, stored XSS via SVG/HTML, SSRF via SVG/XML, and webshell techniques.
 sources: hack_skills, bug_bounty_reports
 allowed-tools: Bash Read Write Edit Glob Grep Agent WebFetch WebSearch
@@ -441,3 +441,4 @@ curl -s -X POST "https://$TARGET/api/import" \
 - **`hunt-ssrf`** — Image-processing libraries (ImageMagick, ffmpeg) fetch remote URLs from inside the uploaded file. Chain primitive: upload an SVG/MVG with `<image xlink:href="http://169.254.169.254/latest/meta-data/iam/security-credentials/">` or ffmpeg `concat:http://internal/...` → SSRF to AWS IMDS → cloud creds; the ImageTragick CVE-2016-3714 family is still alive on legacy farms.
 - **`security-arsenal`** — Reach for the file-upload bypass tree: 10-row extension/MIME/magic-byte bypass table (double-ext, null-byte, case variants, `.phtml`/`.phar`/`.php5`/`.pht`, `.htaccess` upload to re-enable handlers, `web.config` upload on IIS), SVG/MVG/SVGZ payloads, DOCX-XXE templates, ZIP-slip path traversal in archives, polyglot generators.
 - **`triage-validation`** — Apply the Reproducibility Gate. A file successfully uploaded but never served, never executed, never parsed by anything is not a finding — it's a write-only blob. Critical RCE requires the actual `whoami` round-trip from the uploaded shell; stored XSS requires the popup firing in a victim browser, not just the file existing on disk.
+

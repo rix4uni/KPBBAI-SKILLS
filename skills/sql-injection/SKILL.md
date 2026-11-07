@@ -1,5 +1,5 @@
----
-name: sqli-sql-injection
+﻿---
+name: sql-injection
 description: SQL injection — detection (error/boolean/time-based), UNION extraction, blind SQLi automation, out-of-band exfiltration (DNS/HTTP/SMB/LDAP), OS escalation (xp_cmdshell/UDF/Java), second-order injection, parameterized query bypass scenarios, WAF/filter evasion matrix, DB metadata extraction, and sqlmap advanced usage across MySQL/MSSQL/Oracle/PostgreSQL.
 sources:
   - hack-skills/skills/sqli-sql-injection
@@ -1836,3 +1836,4 @@ The following real, verified bug-bounty / CVE / coordinated-disclosure cases ext
 - **`hunt-auth-bypass`** — Classic `' OR 1=1 --` in login forms or session tables is auth-bypass-via-SQLi. Chain primitive: SQLi on the `password_reset_tokens` table → read or insert a token row for `admin@target.com` → ATO without ever seeing the original password.
 - **`security-arsenal`** — Reach for the SQLi payload tree (WAF-bypass union variants `/**/UnIoN/**/SeLeCt/**/`, MSSQL `WAITFOR DELAY '0:0:10'`, MySQL `SLEEP(10)`, Postgres `pg_sleep(10)`, Oracle `DBMS_PIPE.RECEIVE_MESSAGE`, NoSQLi `{"$ne": null}` / `{"$where": "sleep(5000)"}`, second-order via stored-then-rendered fields).
 - **`triage-validation`** — Apply the Reproducibility Gate before reporting. A 200ms delta on a sleep-10 payload is noise, not blind SQLi. Require statistical evidence (5 trials at 0s vs 5 trials at 10s, non-overlapping confidence intervals) or an OOB DNS callback with a unique marker. The hunt-sqli internal sentinel/baseline pattern exists for exactly this.
+

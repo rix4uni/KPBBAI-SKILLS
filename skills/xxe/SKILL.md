@@ -1,5 +1,5 @@
----
-name: xxe-phantom
+﻿---
+name: xxe
 description: An XXE detection and exploitation methodology engine. Triggered when testing for XML injection, interacting with XML content-types/endpoints, or processing XML-based file uploads (SVG, DOCX, SAML, SOAP). Facilitates classic file reads, blind OOB exfiltration, WAF bypasses, and SSRF chaining. Includes report structuring.
 license: MIT
 metadata:
@@ -1422,3 +1422,4 @@ The following real, verified bug-bounty / coordinated-disclosure cases extend th
 - **`hunt-sharepoint`** — On-prem SharePoint/Exchange/IIS stacks have a long history of XXE in SOAP/CSOM/EWS endpoints. Chain primitive: anonymous XXE in `_vti_bin/*.asmx` or EWS SOAP → read `web.config` → recover `<machineKey>` → ViewState deserialization → RCE (the ToolShell-adjacent precondition).
 - **`security-arsenal`** — Reach for the XXE payload tree: standard SYSTEM file read, parameter-entity OOB DTD pattern (the `%` indirection that makes blind XXE work), `php://filter/convert.base64-encode/resource=` for binary-safe read, XInclude (`<xi:include href=...>`) when DOCTYPE is blocked, billion-laughs/quadratic-blowup for DoS, and the `jar://` / `netdoc://` Java-specific wrappers.
 - **`triage-validation`** — Apply the Reproducibility + Pre-Severity Gates. An XXE that only triggers an OOB DNS callback with NO data exfil is Low/Medium (information disclosure of "this parser fetches entities"), not Critical. Critical needs proof of file read or internal HTTP — show the actual `/etc/passwd` content or the IMDS JSON response in the report.
+

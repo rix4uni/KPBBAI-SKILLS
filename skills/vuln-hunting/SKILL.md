@@ -1,5 +1,5 @@
 ﻿---
-name: vuln-hunter-system
+name: vuln-hunting
 description: VulnHunter is a unified vulnerability assessment orchestrator that coordinates 7 specialized attack modules (100+ sub-agents) to continuously test targets for critical and high-severity vulnerabilities across auth, XSS, RCE, API, deserialization, DOM-XSS, and web cache deception. All findings pass through a 5-gate Validation Gateway before reporting.
 sources: hackerone_public, bug_bounty_reports, owasp, portswigger
 ---
@@ -1225,3 +1225,4 @@ For detailed FP analysis, load the matching module file:
 - API: `agents/api-security/prompts/skills/triage-validation.prompt.md`
 - WCD: `agents/web-cache-deception/chunk-13-false-positive-elimination.md`
 - DESER: `agents/deserialization/14_assessment_methodology_agent.md`
+

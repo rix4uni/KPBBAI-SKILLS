@@ -1,5 +1,5 @@
----
-name: csrf-cross-site-request-forgery
+﻿---
+name: csrf
 description: CSRF attack playbook — token bypass techniques, SameSite cookie bypass, JSON CSRF, multipart CSRF, CORS-based CSRF, CSPT2CSRF (client-side path traversal), clickjacking as CSRF, OAuth CSRF, and CSRF via subdomain takeover.
 sources: hack_skills, bug_bounty_reports
 allowed-tools: Bash Read Write Edit Glob Grep Agent WebFetch WebSearch
@@ -690,3 +690,4 @@ No Duende.BFF-direct CVE exists as of 2026-05. The three classes above are **des
 - **`hunt-oauth`** — OAuth/SAML `state`/`RelayState` is structurally a CSRF token; missing validation here is account-linking CSRF. Chain primitive: attacker initiates OAuth on their account, sends victim the `/callback?code=X&state=` URL → victim's logged-in browser completes the link → attacker's social identity now controls victim's account.
 - **`security-arsenal`** — Reach for the CSRF PoC templates (form POST, `enctype=text/plain` JSON, sandboxed-iframe null-origin, base64 multipart bypass) before writing one from scratch; also the WAF-bypass header variants for Origin/Referer checks.
 - **`triage-validation`** — Run the Pre-Severity Gate before submitting CSRF on a logout endpoint or any action without state-change consequence — those are the canonical N/A traps. Confirm victim LOSES something concrete (account access, money, data), not just "a request executed."
+

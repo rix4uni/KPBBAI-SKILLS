@@ -1,5 +1,5 @@
----
-name: ssti-hunter
+﻿---
+name: server-side-injection
 description: An SSTI detection, fingerprinting, and exploitation engine. Triggered by suspected server-side evaluation (e.g., {{7*7}} = 49) or stack traces referencing a template engine (Jinja2, Twig, FreeMarker, etc.). Facilitates blind detection, sandbox escapes, and escalation to RCE. Includes report structuring (severity, CWE, remediation).
 license: MIT
 metadata:
@@ -1588,5 +1588,6 @@ WAF-block, and length-jitter explanations.
 - `userPassword` hash exfil (non-AD) or `description`-field credential read: **High**
 - AD user/group enumeration only: **Medium-High**
 - Blind boolean oracle confirmed but no useful attribute reachable: **Medium**
+
 
 

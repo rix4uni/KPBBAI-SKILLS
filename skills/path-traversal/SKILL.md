@@ -1,5 +1,5 @@
----
-name: path-traversal-lfi
+﻿---
+name: path-traversal
 description: Path traversal and LFI playbook — encoding variants (../,  %2e%2e%2f, 0x2e0x2e0x2f, URL double-encoding), LFI to RCE (log poisoning, /proc/self/fd, PHP wrappers, session files), LFI to SSRF via php://input, Windows-specific paths, and directory traversal in zip/tar archives.
 sources: hack_skills, bug_bounty_reports
 allowed-tools: Bash Read Write Edit Glob Grep Agent WebFetch WebSearch
@@ -1008,4 +1008,5 @@ C:\Windows\System32\inetsrv\config\applicationHost.config
 - Non-sensitive file read: **Medium**
 - File read exposing DB creds / API keys / private keys / cloud creds: **High**
 - RCE via filter-chain / RFI / log / session / phar / CVE: **Critical**
+
 

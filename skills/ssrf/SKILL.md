@@ -1,5 +1,5 @@
----
-name: ssrf-hunter
+﻿---
+name: ssrf
 description: Complete SSRF detection and exploitation methodology injection point discovery, cloud metadata theft (AWS/GCP/Azure), internal network enumeration, protocol handler abuse, filter bypass techniques, blind SSRF via OOB, and report structure. Trigger when the user sees any parameter that accepts a URL, hostname, IP, or path, wants to check if a server fetches external resources, is testing cloud-hosted applications for metadata endpoint access, or wants to probe internal services through a compromised SSRF point.
 metadata:
   version: "1.0.0"
@@ -863,3 +863,4 @@ The following real, verified bug-bounty / coordinated-disclosure cases extend th
 - **`hunt-cloud-misconfig`** — Internal-only buckets/APIs become reachable through SSRF egress. Chain primitive: SSRF + DNS rebinding → SSRF-protected-endpoint bypass → internal /admin or private S3 bucket read.
 - **`security-arsenal`** — Load the SSRF IP Bypass Table (11 techniques: decimal IP, IPv6 mapped, octal, suffix dot, DNS rebinding, redirect chain, etc.) before testing filters.
 - **`triage-validation`** — Apply the OOB-Or-It-Didn't-Happen gate: every blind SSRF claim requires a Burp Collaborator hit with a unique marker before report submission.
+
